@@ -73,9 +73,17 @@ def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_w
         if not args.skip_scheduler:
             scheduler(step)
 
-        images, texts = batch
+        images, texts, attention_masks = batch['images'], batch['texts'], batch['attention_masks']
         images = images.to(device=device, dtype=cast_dtype, non_blocking=True)
         texts = texts.to(device=device, non_blocking=True)
+        attention_masks = attention_masks.to(device=device, non_blocking=True)
+
+        # TODO(gmittal): make this easier to toggle
+        if 'mlm' in batch:
+            masked_texts = batch['mlm']['input_ids']
+            masked_labels = batch['mlm']['labels']
+            masked_texts = masked_texts.to(device=device, non_blocking=True)
+            masked_laels = masked_labels.to(device=device, non_blocking=True)
 
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()

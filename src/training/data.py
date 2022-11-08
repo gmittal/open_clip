@@ -19,6 +19,7 @@ from datasets import load_dataset
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, IterableDataset, get_worker_info
 from torch.utils.data.distributed import DistributedSampler
+from transformers import DataCollatorForLanguageModeling
 from webdataset.filters import _shuffle
 from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
 
@@ -62,8 +63,8 @@ class CsvDataset(Dataset):
 
     def __getitem__(self, idx):
         images = self.transforms(Image.open(str(self.images[idx])))
-        texts = self.tokenize([str(self.captions[idx])])[0]
-        return images, texts
+        texts, attention_masks = self.tokenize([str(self.captions[idx])])
+        return images, texts[0], attention_masks[0]
 
 
 class SharedEpoch:
@@ -427,8 +428,35 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name=None)
     sampler = DistributedSampler(dataset) if args.distributed and is_train else None
     shuffle = is_train and sampler is None
 
-    import pdb; pdb.set_trace()
+    mlm_collator = None
+    # TODO(gmittal): only turn on DataCollatorForLanguageModeling
+    # when MLM is active.
+    if isinstance(dataset.tokenize, HFTokenizer):
+        hf_tokenizer = dataset.tokenize.tokenizer
+        # The following special tokens are required for
+        # the data collator to work correctly.
+        assert getattr(hf_tokenizer, 'pad_token', False)
+        assert getattr(hf_tokenizer, 'mask_token', False)
+        mlm_collator = DataCollatorForLanguageModeling(
+            tokenizer=hf_tokenizer,
+            mlm=True,
+            mlm_probability=0.15,
+        )
 
+    def collate(example_list):
+        images, texts, attn_masks = zip(*example_list)
+        batch = {
+            'images': torch.stack(images),
+            'texts': torch.stack(texts),
+            'attention_masks': torch.stack(attn_masks)
+        }
+        if mlm_collator is not None:
+            mlm_inputs = mlm_collator(texts)
+            batch.update({'mlm': mlm_inputs})
+        return batch
+
+    # TODO(gmittal): MLM will *randomly* mask tokens on validation set
+    # which will lead to weird eval metrics.
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -436,6 +464,7 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name=None)
         num_workers=args.workers,
         pin_memory=True,
         sampler=sampler,
+        collate_fn=collate,
         drop_last=is_train,
     )
     dataloader.num_samples = num_samples
