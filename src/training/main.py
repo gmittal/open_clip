@@ -224,6 +224,7 @@ def main(args):
             logging.info("=> no checkpoint found at '{}'".format(args.resume))
 
     # initialize datasets
+    import pdb; pdb.set_trace()
     data = get_data(args, (preprocess_train, preprocess_val), epoch=start_epoch)
     assert len(data), 'At least one train or eval dataset must be specified.'
 

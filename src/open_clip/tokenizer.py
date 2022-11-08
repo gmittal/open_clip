@@ -190,6 +190,11 @@ class HFTokenizer:
     def __init__(self, tokenizer_name:str, squeeze=False):
         from transformers import AutoTokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+        if tokenizer_name == 'gpt2':
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.tokenizer.add_special_tokens({'mask_token': '<|mask|>'})
+
         self.squeeze = squeeze
 
     def __call__(self, texts:Union[str, List[str]], context_length:int=77) -> torch.Tensor:

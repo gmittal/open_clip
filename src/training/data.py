@@ -15,6 +15,7 @@ import pandas as pd
 import torch
 import torchvision.datasets as datasets
 import webdataset as wds
+from datasets import load_dataset
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, IterableDataset, get_worker_info
 from torch.utils.data.distributed import DistributedSampler
@@ -30,6 +31,20 @@ from open_clip import tokenize
 from open_clip.tokenizer import HFTokenizer
 
 
+class HFDataset(Dataset):
+    def __init__(self, name, subset, split, tokenizer_name=None):
+        self.dataset = load_dataset(name, subset, split=split)
+
+        self.tokenizer_name = getattr(self, 'tokenizer_name', None)
+        self.tokenize = HFTokenizer(tokenizer_name) if self.tokenizer_name else tokenize
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        return self.tokenize([str(self.dataset[idx]['text'])])[0]
+
+
 class CsvDataset(Dataset):
     def __init__(self, input_filename, transforms, img_key, caption_key, sep="\t", tokenizer_name=None):
         logging.debug(f'Loading csv data from {input_filename}.')
@@ -40,7 +55,7 @@ class CsvDataset(Dataset):
         self.transforms = transforms
         logging.debug('Done loading data.')
 
-        self.tokenize = HFTokenizer(tokenizer_name) if self.tokenizer_name else tokenize
+        self.tokenize = HFTokenizer(tokenizer_name) if tokenizer_name else tokenize
 
     def __len__(self):
         return len(self.captions)
@@ -412,6 +427,8 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name=None)
     sampler = DistributedSampler(dataset) if args.distributed and is_train else None
     shuffle = is_train and sampler is None
 
+    import pdb; pdb.set_trace()
+
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -425,6 +442,7 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name=None)
     dataloader.num_batches = len(dataloader)
 
     return DataInfo(dataloader, sampler)
+
 
 class SyntheticDataset(Dataset):
 
@@ -468,6 +486,7 @@ def get_synthetic_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name
 
     return DataInfo(dataloader, sampler)
 
+
 def get_dataset_fn(data_path, dataset_type):
     if dataset_type == "webdataset":
         return get_wds_dataset
@@ -486,7 +505,7 @@ def get_dataset_fn(data_path, dataset_type):
                 f"Tried to figure out dataset type, but failed for extention {ext}.")
     else:
         raise ValueError(f"Unsupported dataset type: {dataset_type}")
-    
+
 
 def get_data(args, preprocess_fns, epoch=0):
     preprocess_train, preprocess_val = preprocess_fns

@@ -69,7 +69,7 @@ def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_w
     end = time.time()
     for i, batch in enumerate(dataloader):
         step = num_batches_per_epoch * epoch + i
-        
+
         if not args.skip_scheduler:
             scheduler(step)
 
