@@ -250,18 +250,7 @@ class FLAVA(nn.Module):
         pass
 
     def encode_multimodal(self, image, text, return_sequences=False):
-        image_hidden = self.visual(image)  # TODO: add image mask
-
-        embed_text = self.text_embedding(text)
-
-        # TODO: check this!
-        text_attn_mask = torch.ones(self.context_length + 1, self.context_length + 1, device=text.device)
-        text_hidden = self.language(embed_text, text_attn_mask)
-
-        if not return_sequences:
-            cls_mm = mm_hidden[:, 0, :]
-            return self.mm_projection(cls_mm)
-        return mm_hidden
+        pass
 
     def forward(
         self,
