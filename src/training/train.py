@@ -83,10 +83,10 @@ def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_w
         if not args.skip_scheduler:
             scheduler(step)
 
-        images, texts, text_padding_masks = batch['image'], batch['text'], batch['text_padding_mask']
+        images, texts, text_input_masks = batch['image'], batch['text'], batch['text_input_mask']
         images = images.to(device=device, dtype=cast_dtype, non_blocking=True)
         texts = texts.to(device=device, non_blocking=True)
-        text_padding_masks = text_padding_masks.to(device=device, non_blocking=True)
+        text_input_masks = text_input_masks.to(device=device, non_blocking=True)
 
         if 'mlm' in batch:
             text_masked = batch['mlm']['input_ids']
@@ -104,11 +104,11 @@ def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_w
                 image_features, text_features = model(
                     image=images,
                     text=texts,
-                    text_padding_mask=text_padding_masks,
+                    text_input_mask=text_input_masks,
                     text_masked=text_masked,
-                    text_masked_labels=text_masked_labels,
                 )
                 import pdb; pdb.set_trace()
+                # use text_masked_labels here!
                 total_loss = loss(image_features, text_features)
             else:
                 image_features, text_features, logit_scale = model(images, texts)

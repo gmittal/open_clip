@@ -10,6 +10,7 @@
       "patch_size": 16
   },
   "text_cfg": {
+      "block_size": 77,
       "vocab_size": 50259,
       "width": 128,
       "output_dim": 128,

@@ -449,7 +449,7 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name=None)
         batch = {
             'image': torch.stack(image),
             'text': torch.stack(text),
-            'text_padding_mask': torch.stack(input_mask)
+            'text_input_mask': torch.stack(input_mask)
         }
         if mlm_collator is not None:
             mlm_input = mlm_collator(text)

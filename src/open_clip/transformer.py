@@ -75,7 +75,8 @@ class Attention(nn.Module):
         self.out_proj = nn.Linear(dim, dim)
         self.out_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x, attn_mask: Optional[torch.Tensor] = None):
+    def forward(self, x, attn_mask: Optional[torch.Tensor] = None, key_padding_mask: Optional[torch.Tensor] = None):
+        assert key_padding_mask is None, 'key_padding_mask not supported'  # TODO(gmittal): fix this
         L, N, C = x.shape
         q, k, v = F.linear(x, self.in_proj_weight, self.in_proj_bias).chunk(3, dim=-1)
         q = q.contiguous().view(L, N * self.num_heads, -1).transpose(0, 1)
@@ -136,12 +137,12 @@ class ResidualAttentionBlock(nn.Module):
         ]))
         self.ls_2 = LayerScale(d_model, ls_init_value) if ls_init_value else nn.Identity()
 
-    def attention(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None):
+    def attention(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None, key_padding_mask: Optional[torch.Tensor] = None):
         attn_mask = attn_mask.to(x.dtype) if attn_mask is not None else None
-        return self.attn(x, x, x, need_weights=False, attn_mask=attn_mask)[0]
+        return self.attn(x, x, x, need_weights=False, attn_mask=attn_mask, key_padding_mask=key_padding_mask)[0]
 
-    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None):
-        x = x + self.ls_1(self.attention(self.ln_1(x), attn_mask=attn_mask))
+    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None, key_padding_mask: Optional[torch.Tensor] = None):
+        x = x + self.ls_1(self.attention(self.ln_1(x), attn_mask=attn_mask, key_padding_mask=key_padding_mask))
         x = x + self.ls_2(self.mlp(self.ln_2(x)))
         return x
 
@@ -181,8 +182,8 @@ class CustomResidualAttentionBlock(nn.Module):
         ]))
         self.ls_2 = LayerScale(d_model, ls_init_value) if ls_init_value else nn.Identity()
 
-    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None):
-        x = x + self.ls_1(self.ln_attn(self.attn(self.ln_1(x), attn_mask=attn_mask)))
+    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None, key_padding_mask: Optional[torch.Tensor] = None):
+        x = x + self.ls_1(self.ln_attn(self.attn(self.ln_1(x), attn_mask=attn_mask, key_padding_mask=key_padding_mask)))
         x = x + self.ls_2(self.mlp(self.ln_2(x)))
         return x
 
@@ -212,12 +213,17 @@ class Transformer(nn.Module):
     def get_cast_dtype(self) -> torch.dtype:
         return self.resblocks[0].mlp.c_fc.weight.dtype
 
-    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None):
+    def forward(
+        self,
+        x: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+        key_padding_mask: Optional[torch.Tensor] = None,
+    ):
         for r in self.resblocks:
             if self.grad_checkpointing and not torch.jit.is_scripting():
-                x = checkpoint(r, x, attn_mask)
+                x = checkpoint(r, x, attn_mask, key_padding_mask)
             else:
-                x = r(x, attn_mask=attn_mask)
+                x = r(x, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
         return x
 
 
