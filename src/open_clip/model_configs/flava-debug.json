@@ -1,15 +1,25 @@
 {
+  "flava": true,
   "embed_dim": 512,
   "vision_cfg": {
       "image_size": 224,
       "layers": 4,
       "width": 128,
+      "heads": 4,
+      "hidden_size": 128,
       "patch_size": 16
   },
   "text_cfg": {
-      "vocab_size": 49408,
+      "vocab_size": 50259,
       "width": 128,
+      "hidden_size": 128,
       "heads": 4,
       "layers": 4
+  },
+  "multimodal_cfg": {
+    "width": 128,
+    "hidden_size": 128,
+    "heads": 4,
+    "layers": 4
   }
 }

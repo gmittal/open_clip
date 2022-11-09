@@ -1,12 +1,12 @@
 """FLAVA model"""
 # from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 
 import torch
 from torch import nn
 
-from .model import Transformer, LayerNorm
+from .transformer import Transformer
 from .utils import to_2tuple
 
 
@@ -32,11 +32,11 @@ class ImageEncoder(nn.Module):
         scale = width ** -0.5
         self.class_embedding = nn.Parameter(scale * torch.randn(width))
         self.positional_embedding = nn.Parameter(scale * torch.randn(self.grid_size[0] * self.grid_size[1] + 1, width))
-        self.ln_pre = LayerNorm(width)
+        self.ln_pre = nn.LayerNorm(width)
 
         self.transformer = Transformer(width, layers, heads, mlp_ratio, act_layer=act_layer)
 
-        self.ln_post = LayerNorm(width)
+        self.ln_post = nn.LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
     def lock(self, unlocked_groups=0, freeze_bn_stats=False):
@@ -84,13 +84,13 @@ class TransformerEncoder(nn.Module):
 
         scale = width ** -0.5
         self.class_embedding = nn.Parameter(scale * torch.randn(width))
-        self.ln_pre = LayerNorm(width)
+        self.ln_pre = nn.LayerNorm(width)
 
         self.positional_embedding = nn.Parameter(scale * torch.randn(block_size + 1, width))
 
         self.transformer = Transformer(width, layers, heads, mlp_ratio, act_layer=act_layer)
 
-        self.ln_post = LayerNorm(width)
+        self.ln_post = nn.LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
     def lock(self, unlocked_groups=0, freeze_bn_stats=False):
@@ -166,10 +166,12 @@ class FLAVA(nn.Module):
             text_cfg: FLAVATextCfg,
             multimodal_cfg: FLAVAMultimodalCfg,
             quick_gelu: bool = False,
+            cast_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
 
         del quick_gelu  # unused
+        del cast_dtype  # TODO(gmittal): implement this
 
         if isinstance(vision_cfg, dict):
             vision_cfg = FLAVAVisionCfg(**vision_cfg)
@@ -182,7 +184,7 @@ class FLAVA(nn.Module):
         grid_size = vision_cfg.image_size // vision_cfg.patch_size
         self.mm_context_length = grid_size * grid_size + self.context_length
 
-        self.image_encoder = ImageEncoder(
+        self.visual = ImageEncoder(
             image_size=vision_cfg.image_size,
             patch_size=vision_cfg.patch_size,
             width=vision_cfg.width,
@@ -194,7 +196,7 @@ class FLAVA(nn.Module):
         )
 
         self.text_embedding = nn.Embedding(text_cfg.vocab_size, text_cfg.width)
-        self.text_encoder = TransformerEncoder(
+        self.language = TransformerEncoder(
             block_size=self.context_length,
             width=text_cfg.width,
             layers=text_cfg.layers,
@@ -204,7 +206,7 @@ class FLAVA(nn.Module):
             act_layer=nn.GELU,
         )
 
-        self.mm_encoder = TransformerEncoder(
+        self.multimodal = TransformerEncoder(
             block_size=self.mm_context_length,
             width=multimodal_cfg.width,
             layers=multimodal_cfg.layers,
@@ -227,7 +229,7 @@ class FLAVA(nn.Module):
         self.transformer.grad_checkpointing = enable
 
     def encode_image(self, image, return_sequences=False):
-        hidden_state = self.image_encoder(image)
+        hidden_state = self.visual(image)
         if not return_sequences:
             cls_i = hidden_state[:, 0, :]
             return self.image_projection(cls_i)
@@ -236,33 +238,35 @@ class FLAVA(nn.Module):
     def encode_text(self, text, return_sequences=False):
         x = self.text_embedding(text)  # [batch_size, n_ctx, d_model]
         attn_mask = torch.ones(self.context_length + 1, self.context_length + 1, device=text.device)
-        hidden_state = self.text_encoder(x, attn_mask)
+        hidden_state = self.language(x, attn_mask)
         if not return_sequences:
             cls_t = hidden_state[:, 0, :]
             return self.text_projection(cls_t)
         return hidden_state
 
     def encode_multimodal(self, image, text, return_sequences=False):
-        image_hidden = self.image_encoder(image)  # TODO: add image mask
+        image_hidden = self.visual(image)  # TODO: add image mask
 
         embed_text = self.text_embedding(text)
 
         # TODO: check this!
         text_attn_mask = torch.ones(self.context_length + 1, self.context_length + 1, device=text.device)
-        text_hidden = self.text_encoder(embed_text, text_attn_mask)
+        text_hidden = self.language(embed_text, text_attn_mask)
 
         image_hidden = self.image_to_mm_projection(image_hidden)[:, 1:, :]
         text_hidden = self.text_to_mm_projection(text_hidden)[:, 1:, :]
         x = torch.cat([image_hidden, text_hidden], dim=1)  # [*, image_ctx + text_ctx, d_mm]
         mm_attn_mask = torch.ones(self.mm_context_length + 1, self.mm_context_length + 1, device=x.device)
-        mm_hidden = self.mm_encoder(x, mm_attn_mask)
+        mm_hidden = self.multimodal(x, mm_attn_mask)
         if not return_sequences:
             cls_mm = mm_hidden[:, 0, :]
             return self.mm_projection(cls_mm)
         return mm_hidden
 
-    def forward(self, image, text):
+    def forward(self, image, text, text_input_mask=None):
         # TODO: this is going to be complicated with all of the masks, losses, etc.
+
+        import pdb; pdb.set_trace()
 
         if image is None:
             return self.encode_text(text)

@@ -12,6 +12,7 @@ import torch
 from .constants import OPENAI_DATASET_MEAN, OPENAI_DATASET_STD
 from .model import CLIP, CustomTextCLIP, convert_weights_to_lp, convert_to_custom_text_state_dict,\
     resize_pos_embed, get_cast_dtype
+from .flava_model import FLAVA
 from .openai import load_openai_model
 from .pretrained import is_pretrained_cfg, get_pretrained_cfg, download_pretrained, list_pretrained_tags_by_model
 from .transform import image_transform
@@ -135,9 +136,12 @@ def create_model(
 
         cast_dtype = get_cast_dtype(precision)
         custom_text = model_cfg.pop('custom_text', False) or force_custom_text or ('hf_model_name' in model_cfg['text_cfg'])
+        is_flava = model_cfg.pop('flava', False)
 
         if custom_text:
             model = CustomTextCLIP(**model_cfg, cast_dtype=cast_dtype)
+        elif is_flava:
+            model = FLAVA(**model_cfg, cast_dtype=cast_dtype)
         else:
             model = CLIP(**model_cfg, cast_dtype=cast_dtype)
 
