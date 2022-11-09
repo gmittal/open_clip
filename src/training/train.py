@@ -13,7 +13,7 @@ try:
 except ImportError:
     wandb = None
 
-from open_clip import ClipLoss, get_cast_dtype
+from open_clip import ClipLoss, FlavaLoss, get_cast_dtype
 from .distributed import is_master
 from .zero_shot import zero_shot_eval
 from .precision import get_autocast
@@ -48,15 +48,25 @@ def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_w
     device = torch.device(args.device)
     autocast = get_autocast(args.precision)
     cast_dtype = get_cast_dtype(args.precision)
+    is_flava = args.model.startswith('flava')
 
     model.train()
-    loss = ClipLoss(
-        local_loss=args.local_loss,
-        gather_with_grad=args.gather_with_grad,
-        cache_labels=True,
-        rank=args.rank,
-        world_size=args.world_size,
-        use_horovod=args.horovod)
+    if is_flava:
+        loss = FlavaLoss(
+            local_loss=args.local_loss,
+            gather_with_grad=args.gather_with_grad,
+            cache_labels=True,
+            rank=args.rank,
+            world_size=args.world_size,
+            use_horovod=args.horovod)
+    else:
+        loss = ClipLoss(
+            local_loss=args.local_loss,
+            gather_with_grad=args.gather_with_grad,
+            cache_labels=True,
+            rank=args.rank,
+            world_size=args.world_size,
+            use_horovod=args.horovod)
 
     data['train'].set_epoch(epoch)  # set epoch in process safe manner via sampler or shared_epoch
     dataloader = data['train'].dataloader
@@ -73,24 +83,36 @@ def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_w
         if not args.skip_scheduler:
             scheduler(step)
 
-        images, texts, attention_masks = batch['images'], batch['texts'], batch['attention_masks']
+        images, texts, text_padding_masks = batch['image'], batch['text'], batch['text_padding_mask']
         images = images.to(device=device, dtype=cast_dtype, non_blocking=True)
         texts = texts.to(device=device, non_blocking=True)
-        attention_masks = attention_masks.to(device=device, non_blocking=True)
+        text_padding_masks = text_padding_masks.to(device=device, non_blocking=True)
 
-        # TODO(gmittal): make this easier to toggle
         if 'mlm' in batch:
-            masked_texts = batch['mlm']['input_ids']
-            masked_labels = batch['mlm']['labels']
-            masked_texts = masked_texts.to(device=device, non_blocking=True)
-            masked_laels = masked_labels.to(device=device, non_blocking=True)
+            text_masked = batch['mlm']['input_ids']
+            text_masked_labels = batch['mlm']['labels']
+            text_masked = text_masked.to(device=device, non_blocking=True)
+            text_masked_labels = text_masked_labels.to(device=device, non_blocking=True)
 
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
 
         with autocast():
-            image_features, text_features, logit_scale = model(images, texts)
-            total_loss = loss(image_features, text_features, logit_scale)
+            if is_flava:
+                assert 'mlm' in batch, 'FLAVA pretraining requires MLM inputs.'
+
+                image_features, text_features = model(
+                    image=images,
+                    text=texts,
+                    text_padding_mask=text_padding_masks,
+                    text_masked=text_masked,
+                    text_masked_labels=text_masked_labels,
+                )
+                import pdb; pdb.set_trace()
+                total_loss = loss(image_features, text_features)
+            else:
+                image_features, text_features, logit_scale = model(images, texts)
+                total_loss = loss(image_features, text_features, logit_scale)
 
         if scaler is not None:
             scaler.scale(total_loss).backward()

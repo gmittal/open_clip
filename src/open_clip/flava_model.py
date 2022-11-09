@@ -1,5 +1,4 @@
 """FLAVA model"""
-# from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -10,7 +9,7 @@ from .transformer import Transformer
 from .utils import to_2tuple
 
 
-class ImageEncoder(nn.Module):
+class VisionTransformer(nn.Module):
     def __init__(
             self,
             image_size: int,
@@ -68,7 +67,7 @@ class ImageEncoder(nn.Module):
         return x  # x[:, 0, :] is [CLS_I]
 
 
-class TransformerEncoder(nn.Module):
+class EmbeddingTransformer(nn.Module):
     def __init__(
             self,
             block_size: int,  # n_ctx
@@ -127,7 +126,7 @@ class FLAVAVisionCfg:
     layers: int = 12
     heads: int = 12
     mlp_ratio = 4
-    hidden_size: int = 768  # output dim of transformer, not embed_dim
+    output_dim: int = 768  # output dim of transformer, not embed_dim
 
     layer_norm_eps: float = 1e-12
     use_image_masking: bool = True
@@ -141,7 +140,7 @@ class FLAVATextCfg:
     layers: int = 12
     heads: int = 8
     mlp_ratio = 4
-    hidden_size: int = 768
+    output_dim: int = 768
 
     layer_norm_eps: float = 1e-12,
     pad_token_id: int = 0,
@@ -153,7 +152,7 @@ class FLAVAMultimodalCfg:
     layers: int = 6
     heads: int = 12
     mlp_ratio = 4
-    hidden_size: int = 768
+    output_dim: int = 768
 
     layer_norm_eps: float = 1e-12,
 
@@ -184,49 +183,50 @@ class FLAVA(nn.Module):
         grid_size = vision_cfg.image_size // vision_cfg.patch_size
         self.mm_context_length = grid_size * grid_size + self.context_length
 
-        self.visual = ImageEncoder(
+        self.visual = VisionTransformer(
             image_size=vision_cfg.image_size,
             patch_size=vision_cfg.patch_size,
             width=vision_cfg.width,
             layers=vision_cfg.layers,
             heads=vision_cfg.heads,
             mlp_ratio=vision_cfg.mlp_ratio,
-            output_dim=vision_cfg.hidden_size,
+            output_dim=vision_cfg.output_dim,
             act_layer=nn.GELU,
         )
 
         self.text_embedding = nn.Embedding(text_cfg.vocab_size, text_cfg.width)
-        self.language = TransformerEncoder(
+        self.language = EmbeddingTransformer(
             block_size=self.context_length,
             width=text_cfg.width,
             layers=text_cfg.layers,
             heads=text_cfg.heads,
             mlp_ratio=text_cfg.mlp_ratio,
-            output_dim=text_cfg.hidden_size,
+            output_dim=text_cfg.output_dim,
             act_layer=nn.GELU,
         )
 
-        self.multimodal = TransformerEncoder(
+        self.multimodal = EmbeddingTransformer(
             block_size=self.mm_context_length,
             width=multimodal_cfg.width,
             layers=multimodal_cfg.layers,
             heads=multimodal_cfg.heads,
             mlp_ratio=multimodal_cfg.mlp_ratio,
-            output_dim=multimodal_cfg.hidden_size,
+            output_dim=multimodal_cfg.output_dim,
             act_layer=nn.GELU,
         )
 
-        self.image_to_mm_projection = nn.Linear(vision_cfg.hidden_size, multimodal_cfg.width)
-        self.text_to_mm_projection = nn.Linear(text_cfg.hidden_size, multimodal_cfg.width)
+        self.image_to_mm_projection = nn.Linear(vision_cfg.output_dim, multimodal_cfg.width)
+        self.text_to_mm_projection = nn.Linear(text_cfg.output_dim, multimodal_cfg.width)
 
-        self.image_projection = nn.Linear(vision_cfg.hidden_size, embed_dim)
-        self.text_projection = nn.Linear(text_cfg.hidden_size, embed_dim)
-        self.mm_projection = nn.Linear(multimodal_cfg.hidden_size, embed_dim)
+        self.image_projection = nn.Linear(vision_cfg.output_dim, embed_dim)
+        self.text_projection = nn.Linear(text_cfg.output_dim, embed_dim)
+        self.mm_projection = nn.Linear(multimodal_cfg.output_dim, embed_dim)
 
     @torch.jit.ignore
     def set_grad_checkpointing(self, enable=True):
         self.visual.set_grad_checkpointing(enable)
-        self.transformer.grad_checkpointing = enable
+        self.language.grad_checkpointing(enable)
+        self.multimodal.grad_checkpointing(enable)
 
     def encode_image(self, image, return_sequences=False):
         hidden_state = self.visual(image)
@@ -263,7 +263,15 @@ class FLAVA(nn.Module):
             return self.mm_projection(cls_mm)
         return mm_hidden
 
-    def forward(self, image, text, text_input_mask=None):
+    def forward(
+        self,
+        *,
+        image,
+        text,
+        text_padding_mask,
+        text_masked,
+        text_masked_labels,
+    ):
         # TODO: this is going to be complicated with all of the masks, losses, etc.
 
         import pdb; pdb.set_trace()

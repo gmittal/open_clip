@@ -43,6 +43,7 @@ class HFDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx):
+        raise NotImplementedError
         return self.tokenize([str(self.dataset[idx]['text'])])[0]
 
 
@@ -63,8 +64,8 @@ class CsvDataset(Dataset):
 
     def __getitem__(self, idx):
         images = self.transforms(Image.open(str(self.images[idx])))
-        texts, attention_masks = self.tokenize([str(self.captions[idx])])
-        return images, texts[0], attention_masks[0]
+        texts, padding_masks = self.tokenize([str(self.captions[idx])])
+        return images, texts[0], padding_masks[0]
 
 
 class SharedEpoch:
@@ -444,15 +445,15 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name=None)
         )
 
     def collate(example_list):
-        images, texts, attn_masks = zip(*example_list)
+        image, text, input_mask = zip(*example_list)
         batch = {
-            'images': torch.stack(images),
-            'texts': torch.stack(texts),
-            'attention_masks': torch.stack(attn_masks)
+            'image': torch.stack(image),
+            'text': torch.stack(text),
+            'text_padding_mask': torch.stack(input_mask)
         }
         if mlm_collator is not None:
-            mlm_inputs = mlm_collator(texts)
-            batch.update({'mlm': mlm_inputs})
+            mlm_input = mlm_collator(text)
+            batch.update({'mlm': mlm_input})
         return batch
 
     # TODO(gmittal): MLM will *randomly* mask tokens on validation set
