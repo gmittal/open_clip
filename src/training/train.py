@@ -101,15 +101,19 @@ def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_w
             if is_flava:
                 assert 'mlm' in batch, 'FLAVA pretraining requires MLM inputs.'
 
-                image_features, text_features = model(
+                image_features, text_features, logit_scale, text_masked_recon = model(
                     image=images,
                     text=texts,
                     text_input_mask=text_input_masks,
                     text_masked=text_masked,
                 )
-                import pdb; pdb.set_trace()
-                # use text_masked_labels here!
-                total_loss = loss(image_features, text_features)
+                total_loss = loss(
+                    image_features=image_features,
+                    text_features=text_features,
+                    logit_scale=logit_scale,
+                    text_masked_recon_logits=text_masked_recon,
+                    text_masked_labels=text_masked_labels,
+                )
             else:
                 image_features, text_features, logit_scale = model(images, texts)
                 total_loss = loss(image_features, text_features, logit_scale)
@@ -142,7 +146,7 @@ def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_w
         batch_time_m.update(time.time() - end)
         end = time.time()
         batch_count = i + 1
-        if is_master(args) and (i % 100 == 0 or batch_count == num_batches_per_epoch):
+        if is_master(args) and (i % 1 == 0 or batch_count == num_batches_per_epoch):
             batch_size = len(images)
             num_samples = batch_count * batch_size * args.world_size
             samples_per_epoch = dataloader.num_samples

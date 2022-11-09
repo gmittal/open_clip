@@ -144,9 +144,7 @@ class FlavaLoss(nn.Module):
         self.prev_num_logits = 0
         self.labels = {}
 
-    def forward(self, image_features, text_features, logit_scale):
-        import pdb; pdb.set_trace()
-
+    def gc_loss(self, image_features, text_features, logit_scale):
         device = image_features.device
         if self.world_size > 1:
             all_image_features, all_text_features = gather_features(
@@ -175,8 +173,30 @@ class FlavaLoss(nn.Module):
         else:
             labels = self.labels[device]
 
-        total_loss = (
+        gc_loss = (
             F.cross_entropy(logits_per_image, labels) +
             F.cross_entropy(logits_per_text, labels)
             ) / 2
+        return gc_loss
+
+    def mlm_loss(self, text_masked_logits, text_masked_labels):
+        device = text_masked_logits.device
+        vocab_size = text_masked_logits.shape[-1]
+        text_masked_logits = text_masked_logits.view(-1, vocab_size)
+        text_masked_labels = text_masked_labels.view(-1)
+        ce = F.cross_entropy(text_masked_logits, text_masked_labels, ignore_index=-100)
+        return ce
+
+    def forward(
+        self,
+        *,
+        image_features,
+        text_features,
+        logit_scale,
+        text_masked_recon_logits,
+        text_masked_labels,
+    ):
+        gc_loss = self.gc_loss(image_features, text_features, logit_scale)
+        mlm_loss = self.mlm_loss(text_masked_recon_logits, text_masked_labels)
+        total_loss = 0.5 * gc_loss + 0.5 * mlm_loss
         return total_loss

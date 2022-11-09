@@ -2,7 +2,9 @@
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from .transformer import Transformer
@@ -140,7 +142,7 @@ class FLAVAVisionCfg:
 @dataclass
 class FLAVATextCfg:
     block_size: int = 512
-    vocab_size: int = 50257
+    vocab_size: int = 50259  # GPT-2 vocab + 2 special tokens (pad, mask)
     width: int = 512
     layers: int = 12
     heads: int = 8
@@ -148,7 +150,6 @@ class FLAVATextCfg:
     output_dim: int = 768
 
     layer_norm_eps: float = 1e-12,
-    pad_token_id: int = 0,
 
 
 @dataclass
@@ -237,6 +238,8 @@ class FLAVA(nn.Module):
         self.text_projection = nn.Linear(text_cfg.output_dim, embed_dim)
         self.mm_projection = nn.Linear(multimodal_cfg.output_dim, embed_dim)
 
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+
     @torch.jit.ignore
     def set_grad_checkpointing(self, enable=True):
         self.visual.set_grad_checkpointing(enable)
@@ -272,10 +275,11 @@ class FLAVA(nn.Module):
         # Contrastive task
         text_hidden = self.language(text_embed, key_padding_mask=text_padding_mask)
         text_features = self.text_projection(text_hidden[:, 0, :])
+        text_features = F.normalize(text_features, dim=-1)
 
         # MLM task
         text_masked_hidden = self.language(text_masked_embed, key_padding_mask=text_padding_mask)
-        text_masked_recon = self.masked_lm_head(text_masked_hidden[:, 1:, :])
+        text_masked_recon_logits = self.text_masked_lm_head(text_masked_hidden[:, 1:, :])
 
         ####################
         ###### VISION ######
@@ -284,24 +288,31 @@ class FLAVA(nn.Module):
         # Contrastive task
         image_hidden = self.visual(image)
         image_features = self.image_projection(image_hidden[:, 0, :])
+        image_features = F.normalize(image_features, dim=-1)
 
-        # TODO: add logit_scale for softmax temperature for CLIP
-        # TODO: add masked autoencoder
+        # TODO: MAE task
 
         ####################
         #### MULTIMODAL ####
         ####################
 
-        mm_image_hidden = self.image_to_mm_projection(image_hidden)[:, 1:, :]
-        mm_text_hidden = self.text_to_mm_projection(text_hidden)[:, 1:, :]
-        mm_text_masked_hidden = self.text_to_mm_projection(text_masked_hidden)[:, 1:, :]
+        mm_padding_mask = ~(text_input_mask.type(torch.bool)) # TODO: fix this
 
-        x = torch.cat([image_hidden, text_hidden], dim=1)  # [*, image_ctx + text_ctx, d_mm]
-        mm_attn_mask = torch.ones(self.mm_context_length + 1, self.mm_context_length + 1, device=x.device)
-        mm_hidden = self.multimodal(x, mm_attn_mask)
+        mm_image_hidden = self.image_to_mm_projection(image_hidden[:, 1:, :])
+        mm_text_hidden = self.text_to_mm_projection(text_hidden[:, 1:, :])
+        mm_text_masked_hidden = self.text_to_mm_projection(text_masked_hidden[:, 1:, :])
+
+        # x = torch.cat([mm_image_hidden, mm_text_hidden], dim=1)  # [*, image_ctx + text_ctx, d_mm]
+
+        # mm_hidden = self.multimodal(x, key_padding_mask=mm_padding_mask)
+
+        # TODO: add MLM task for multimodal encoder
 
         # TODO: add image-text matching
         # TODO: add support in data loader that with itm_probability
         # a random text
 
-        return image_features, text_features, text_masked_recon
+        return image_features, \
+               text_features, \
+               self.logit_scale.exp(), \
+               text_masked_recon_logits

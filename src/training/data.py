@@ -33,18 +33,22 @@ from open_clip.tokenizer import HFTokenizer
 
 
 class HFDataset(Dataset):
-    def __init__(self, name, subset, split, tokenizer_name=None):
-        self.dataset = load_dataset(name, subset, split=split)
+    def __init__(self, name, subset, split, transforms=None, img_key=None, caption_key=None, tokenizer_name=None):
+        dataset = load_dataset(name, subset, split=split)
 
-        self.tokenizer_name = getattr(self, 'tokenizer_name', None)
-        self.tokenize = HFTokenizer(tokenizer_name) if self.tokenizer_name else tokenize
+        self.length = len(dataset)
+        self.images = dataset[img_key] if img_key else None
+        self.captions = dataset[caption_key] if caption_key else None
+        self.transforms = transforms
+        logging.debug('Done loading data.')
+
+        self.tokenize = HFTokenizer(tokenizer_name) if tokenizer_name else tokenize
 
     def __len__(self):
-        return len(self.dataset)
+        return self.length
 
     def __getitem__(self, idx):
-        raise NotImplementedError
-        return self.tokenize([str(self.dataset[idx]['text'])])[0]
+        pass
 
 
 class CsvDataset(Dataset):
