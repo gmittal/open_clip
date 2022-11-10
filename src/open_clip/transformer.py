@@ -76,7 +76,7 @@ class Attention(nn.Module):
         self.out_drop = nn.Dropout(proj_drop)
 
     def forward(self, x, attn_mask: Optional[torch.Tensor] = None, key_padding_mask: Optional[torch.Tensor] = None):
-        assert key_padding_mask is None, 'key_padding_mask not supported'  # TODO(gmittal): fix this
+        assert key_padding_mask is None, 'key_padding_mask not supported'  # TODO(gmittal): support key_padding_mask
         L, N, C = x.shape
         q, k, v = F.linear(x, self.in_proj_weight, self.in_proj_bias).chunk(3, dim=-1)
         q = q.contiguous().view(L, N * self.num_heads, -1).transpose(0, 1)
