@@ -180,12 +180,17 @@ class FlavaLoss(nn.Module):
         return gc_loss
 
     def mlm_loss(self, text_masked_logits, text_masked_labels):
-        device = text_masked_logits.device
         vocab_size = text_masked_logits.shape[-1]
         text_masked_logits = text_masked_logits.view(-1, vocab_size)
         text_masked_labels = text_masked_labels.view(-1)
         ce = F.cross_entropy(text_masked_logits, text_masked_labels, ignore_index=-100)
         return ce
+
+    def itm_loss(self, itm_logits, itm_labels):
+        itm_logits = itm_logits.view(-1)
+        itm_labels = itm_labels.view(-1)
+        bce = F.binary_cross_entropy_with_logits(itm_logits, itm_labels)
+        return bce
 
     def forward(
         self,
@@ -195,8 +200,19 @@ class FlavaLoss(nn.Module):
         logit_scale,
         text_masked_recon_logits,
         text_masked_labels,
+        image_text_match_logits,
+        image_text_match_labels,
+        mm_text_masked_recon_logits,
     ):
+        # cross-modal
         gc_loss = self.gc_loss(image_features, text_features, logit_scale)
+
+        # unimodal language
         mlm_loss = self.mlm_loss(text_masked_recon_logits, text_masked_labels)
-        total_loss = 0.5 * gc_loss + 0.5 * mlm_loss
+
+        # multi-modal
+        itm_loss = self.itm_loss(image_text_match_logits, image_text_match_labels)
+        mm_mlm_loss = self.mlm_loss(mm_text_masked_recon_logits, text_masked_labels)
+
+        total_loss = 1.0 * gc_loss + 1.0 * mlm_loss + 1.0 * itm_loss + 1.0 * mm_mlm_loss
         return total_loss

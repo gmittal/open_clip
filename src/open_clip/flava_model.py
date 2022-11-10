@@ -230,6 +230,11 @@ class FLAVA(nn.Module):
             nn.GELU(),
             nn.Linear(multimodal_cfg.width, text_cfg.vocab_size),
         )
+        self.itm_head = nn.Sequential(
+            nn.Linear(embed_dim, multimodal_cfg.width),
+            nn.GELU(),
+            nn.Linear(multimodal_cfg.width, 1),
+        )
 
         self.image_to_mm_projection = nn.Linear(vision_cfg.output_dim, multimodal_cfg.width)
         self.text_to_mm_projection = nn.Linear(text_cfg.output_dim, multimodal_cfg.width)
@@ -262,6 +267,7 @@ class FLAVA(nn.Module):
         text,
         text_input_mask,
         text_masked,
+        image_text_match_images,
     ):
         ####################
         ##### LANGUAGE #####
@@ -296,23 +302,35 @@ class FLAVA(nn.Module):
         #### MULTIMODAL ####
         ####################
 
-        mm_padding_mask = ~(text_input_mask.type(torch.bool)) # TODO: fix this
+        mm_padding_mask = ~(text_input_mask.type(torch.bool))
+        im_hidden_length = image_hidden.shape[1] - 1  # ignore CLS_I token
+        im_pad_mask = torch.zeros(mm_padding_mask.shape[0], im_hidden_length, dtype=torch.bool, device=mm_padding_mask.device)
+        mm_padding_mask = torch.cat([im_pad_mask, mm_padding_mask], dim=1)
 
-        mm_image_hidden = self.image_to_mm_projection(image_hidden[:, 1:, :])
+        # ITM task (corrupted images, uncorrupted text)
+        itm_im_hidden = self.visual(image_text_match_images)
+        mm_itm_im_hidden = self.image_to_mm_projection(itm_im_hidden[:, 1:, :])
         mm_text_hidden = self.text_to_mm_projection(text_hidden[:, 1:, :])
+        mm_inputs = torch.cat([mm_itm_im_hidden, mm_text_hidden], dim=1)  # [*, image_ctx + text_ctx, d_mm]
+
+        mm_hidden = self.multimodal(mm_inputs, key_padding_mask=mm_padding_mask)
+        mm_features = self.mm_projection(mm_hidden[:, 0, :])
+        itm_pred = self.itm_head(mm_features)
+
+        # MLM task (uncorrupted images, corrupted text)
+        mm_image_hidden = self.image_to_mm_projection(image_hidden[:, 1:, :])
         mm_text_masked_hidden = self.text_to_mm_projection(text_masked_hidden[:, 1:, :])
+        mm_inputs_masked = torch.cat([mm_image_hidden, mm_text_masked_hidden], dim=1)
 
-        # x = torch.cat([mm_image_hidden, mm_text_hidden], dim=1)  # [*, image_ctx + text_ctx, d_mm]
+        mm_hidden_masked = self.multimodal(mm_inputs_masked, key_padding_mask=mm_padding_mask)
+        mm_text_hidden = mm_hidden_masked[:, 1+im_hidden_length:, :]
+        mm_text_masked_recon_logits = self.mm_masked_lm_head(mm_text_hidden)
 
-        # mm_hidden = self.multimodal(x, key_padding_mask=mm_padding_mask)
-
-        # TODO: add MLM task for multimodal encoder
-
-        # TODO: add image-text matching
-        # TODO: add support in data loader that with itm_probability
-        # a random text
+        # TODO: MVLM task (https://openreview.net/pdf?id=ZhuXksSJYWn)
 
         return image_features, \
                text_features, \
                self.logit_scale.exp(), \
-               text_masked_recon_logits
+               text_masked_recon_logits, \
+               itm_pred, \
+               mm_text_masked_recon_logits

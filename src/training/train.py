@@ -88,6 +88,12 @@ def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_w
         texts = texts.to(device=device, non_blocking=True)
         text_input_masks = text_input_masks.to(device=device, non_blocking=True)
 
+        if 'itm' in batch:
+            itm_images = batch['itm']['image']
+            itm_labels = batch['itm']['label']
+            itm_images = itm_images.to(device=device, dtype=cast_dtype, non_blocking=True)
+            itm_labels = itm_labels.to(device=device, non_blocking=True)
+
         if 'mlm' in batch:
             text_masked = batch['mlm']['input_ids']
             text_masked_labels = batch['mlm']['labels']
@@ -100,12 +106,19 @@ def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_w
         with autocast():
             if is_flava:
                 assert 'mlm' in batch, 'FLAVA pretraining requires MLM inputs.'
+                assert 'itm' in batch, 'FLAVA pretraining requires ITM inputs.'
 
-                image_features, text_features, logit_scale, text_masked_recon = model(
+                image_features, \
+                text_features, \
+                logit_scale, \
+                text_masked_recon, \
+                itm_logits, \
+                mm_text_masked_recon = model(
                     image=images,
                     text=texts,
                     text_input_mask=text_input_masks,
                     text_masked=text_masked,
+                    image_text_match_images=itm_images,
                 )
                 total_loss = loss(
                     image_features=image_features,
@@ -113,6 +126,9 @@ def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_w
                     logit_scale=logit_scale,
                     text_masked_recon_logits=text_masked_recon,
                     text_masked_labels=text_masked_labels,
+                    image_text_match_logits=itm_logits,
+                    image_text_match_labels=itm_labels,
+                    mm_text_masked_recon_logits=mm_text_masked_recon,
                 )
             else:
                 image_features, text_features, logit_scale = model(images, texts)
