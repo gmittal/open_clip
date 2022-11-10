@@ -97,11 +97,10 @@ class HFDataset(Dataset):
         tokenizer_name=None,
         add_pad_and_mask_tokens=False,
     ):
-        dataset = load_dataset(name, subset, split=split)
-
-        self.length = len(dataset)
-        self.images = dataset[img_key] if img_key else None
-        self.captions = dataset[caption_key] if caption_key else None
+        self.dataset = load_dataset(name, subset, split=split)
+        self.img_key = img_key
+        self.caption_key = caption_key
+        self.length = len(self.dataset)
         self.transforms = transforms
         logging.debug('Done loading data.')
 
@@ -116,7 +115,12 @@ class HFDataset(Dataset):
         return self.length
 
     def __getitem__(self, idx):
-        pass
+        images, captions = None, None
+        if self.img_key:
+            images = self.transforms(self.dataset[idx][self.img_key])
+        if self.caption_key:
+            captions = self.tokenize(self.dataset[idx][self.caption_key])[0]
+        return images, captions
 
 
 class CsvDataset(Dataset):
@@ -185,8 +189,8 @@ def preprocess_txt(text):
     return tokenize([str(text)])[0]
 
 
-def get_text_processor(tokenizer_name:str=None):
-    return preprocess_txt if tokenizer_name is None else HFTokenizer(tokenizer_name, True)
+def get_text_processor(tokenizer_name:str=None, add_pad_and_mask_tokens:bool=False):
+    return preprocess_txt if tokenizer_name is None else HFTokenizer(tokenizer_name, add_pad_and_mask_tokens, True)
 
 
 def get_dataset_size(shards):
@@ -540,10 +544,10 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name=None)
 
 def get_hf_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name=None):
     dataset_str = args.train_data if is_train else args.val_data
-    identifers = dataset_str.split(':')
+    identifiers = dataset_str.split(':')
     assert 1 <= len(identifiers) <= 2, f'Invalid dataset string: {dataset_str}'
-    dataset_name = identifers[0]
-    subset = identifiers[1] if len(identifers) == 2 else None
+    dataset_name = identifiers[0]
+    subset = identifiers[1] if len(identifiers) == 2 else None
     split = 'train' if is_train else 'validation'
     is_flava = args.model.startswith('flava')
 
@@ -552,9 +556,11 @@ def get_hf_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name=None):
         subset,
         split,
         transforms=preprocess_fn,
-        img_key=args.csv_img_key,
-        caption_key=args.csv_caption_key,
-		tokenizer_name=tokenizer_name)
+        img_key=args.hf_img_key,
+        caption_key=args.hf_caption_key,
+		tokenizer_name=tokenizer_name,
+        add_pad_and_mask_tokens=is_flava,
+    )
     num_samples = len(dataset)
     sampler = DistributedSampler(dataset) if args.distributed and is_train else None
     shuffle = is_train and sampler is None
