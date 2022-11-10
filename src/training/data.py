@@ -95,6 +95,7 @@ class HFDataset(Dataset):
         img_key=None,
         caption_key=None,
         tokenizer_name=None,
+        context_length=77,
         add_pad_and_mask_tokens=False,
     ):
         self.dataset = load_dataset(name, subset, split=split)
@@ -104,6 +105,7 @@ class HFDataset(Dataset):
         self.transforms = transforms
         logging.debug('Done loading data.')
 
+        self.context_length = context_length
         self.tokenize = tokenize
         if tokenizer_name:
             self.tokenize = HFTokenizer(
@@ -119,7 +121,9 @@ class HFDataset(Dataset):
         if self.img_key:
             images = self.transforms(self.dataset[idx][self.img_key])
         if self.caption_key:
-            captions = self.tokenize(self.dataset[idx][self.caption_key])[0]
+            captions = self.tokenize(
+                [str(self.dataset[idx][self.caption_key])],
+                context_length=self.context_length)[0]
         return images, captions
 
 
@@ -132,6 +136,7 @@ class CsvDataset(Dataset):
         caption_key,
         sep="\t",
         tokenizer_name=None,
+        context_length=77,
         add_pad_and_mask_tokens=False,
     ):
         logging.debug(f'Loading csv data from {input_filename}.')
@@ -142,6 +147,7 @@ class CsvDataset(Dataset):
         self.transforms = transforms
         logging.debug('Done loading data.')
 
+        self.context_length = context_length
         self.tokenize = tokenize
         if tokenizer_name:
             self.tokenize = HFTokenizer(
@@ -157,7 +163,7 @@ class CsvDataset(Dataset):
         # negative image used for ITM objective
         # TODO: move neg_images to a separate transform
         neg_images = self.transforms(Image.open(str(self.images[(idx + 1) % len(self.images)])))
-        texts = self.tokenize([str(self.captions[idx])])[0]
+        texts = self.tokenize([str(self.captions[idx])], context_length=self.context_length)[0]
         return images, neg_images, texts
 
 
@@ -520,6 +526,7 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name=None)
         caption_key=args.csv_caption_key,
         sep=args.csv_separator,
 		tokenizer_name=tokenizer_name,
+        context_length=args.context_length,
         add_pad_and_mask_tokens=is_flava,
     )
     num_samples = len(dataset)
@@ -559,12 +566,14 @@ def get_hf_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name=None):
         img_key=args.hf_img_key,
         caption_key=args.hf_caption_key,
 		tokenizer_name=tokenizer_name,
+        context_length=args.context_length,
         add_pad_and_mask_tokens=is_flava,
     )
     num_samples = len(dataset)
     sampler = DistributedSampler(dataset) if args.distributed and is_train else None
     shuffle = is_train and sampler is None
 
+    # TODO(gmittal): Fix collate to support unimodal outputs
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
