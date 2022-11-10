@@ -208,7 +208,6 @@ class HFTokenizer:
             texts = [texts]
         texts = [whitespace_clean(basic_clean(text)) for text in texts]
         input_ids = self.tokenizer(texts, return_tensors='pt', max_length=context_length, padding='max_length', truncation=True).input_ids
-
         if self.squeeze:
             return input_ids[0]
         return input_ids
