@@ -175,31 +175,29 @@ def tokenize(texts: Union[str, List[str]], context_length: int = 77) -> torch.Lo
     eot_token = _tokenizer.encoder["<end_of_text>"]
     all_tokens = [[sot_token] + _tokenizer.encode(text) + [eot_token] for text in texts]
     result = torch.zeros(len(all_tokens), context_length, dtype=torch.long)
-    attn_mask = torch.zeros_like(result)
 
     for i, tokens in enumerate(all_tokens):
         if len(tokens) > context_length:
             tokens = tokens[:context_length]  # Truncate
             tokens[-1] = eot_token
         result[i, :len(tokens)] = torch.tensor(tokens)
-        attn_mask[i, :len(tokens)] = torch.ones(len(tokens), dtype=torch.long)
 
-    return result, attn_mask
+    return result
 
 
 class HFTokenizer:
     "HuggingFace tokenizer wrapper"
-    def __init__(self, tokenizer_name:str, squeeze=False):
+    def __init__(self, tokenizer_name:str, add_pad_and_mask_tokens=False, squeeze=False):
         from transformers import AutoTokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
-        # TODO(gmittal): only do this for FLAVA training otherwise this
-        # will interfere with pretrained HF models used with CLIP.
-        if tokenizer_name == 'gpt2':
-            self.tokenizer.add_special_tokens({
-                'pad_token': '<|pad|>',
-                'mask_token': '<|mask|>',
-            })
+        if add_pad_and_mask_tokens:
+            if self.tokenizer.pad_token_id is None:
+                assert '<|pad|>' not in self.tokenizer.get_vocab()
+                self.tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
+            if self.tokenizer.mask_token_id is None:
+                assert '<|mask|>' not in self.tokenizer.get_vocab()
+                self.tokenizer.add_special_tokens({'mask_token': '<|mask|>'})
 
         self.squeeze = squeeze
 
@@ -209,10 +207,8 @@ class HFTokenizer:
         if isinstance(texts, str):
             texts = [texts]
         texts = [whitespace_clean(basic_clean(text)) for text in texts]
-        tokens = self.tokenizer(texts, return_tensors='pt', max_length=context_length, padding='max_length', truncation=True)
-        input_ids = tokens.input_ids
-        attn_mask = tokens.attention_mask
+        input_ids = self.tokenizer(texts, return_tensors='pt', max_length=context_length, padding='max_length', truncation=True).input_ids
 
         if self.squeeze:
-            return input_ids[0], attn_mask[0]
-        return input_ids, attn_mask
+            return input_ids[0]
+        return input_ids

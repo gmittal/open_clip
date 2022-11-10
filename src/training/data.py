@@ -32,8 +32,71 @@ from open_clip import tokenize
 from open_clip.tokenizer import HFTokenizer
 
 
+def get_collate_fn(dataset, is_flava=False):
+    if is_flava:
+        assert isinstance(dataset.tokenize, HFTokenizer)
+        hf_tokenizer = dataset.tokenize.tokenizer
+        # The following special tokens are required for
+        # the data collator to work correctly.
+        assert getattr(hf_tokenizer, 'pad_token', False)
+        assert getattr(hf_tokenizer, 'mask_token', False)
+        mlm_collator = DataCollatorForLanguageModeling(
+            tokenizer=hf_tokenizer,
+            mlm=True,
+            mlm_probability=0.15,
+        )
+        pad_token_id = hf_tokenizer.pad_token_id
+
+    def collate(example_list):
+        image_list, neg_image_list, text_list = zip(*example_list)
+
+        image = torch.stack(image_list)
+        neg_image = torch.stack(neg_image_list)
+        text = torch.stack(text_list)
+        batch = {
+            'image': image,
+            'text': text,
+        }
+
+        if is_flava:
+            # Set up input mask to avoid attending to pad tokens
+            batch['text_input_mask'] = torch.where(text == pad_token_id, 0, 1)
+
+            # ITM
+            itm_prob = 0.1
+            itm_labels = torch.bernoulli(torch.ones(len(image)) * (1 - itm_prob))
+            corrupt_idx = torch.where(itm_labels == 0)
+            itm_image = image.clone()
+            itm_image[corrupt_idx] = neg_image[corrupt_idx]
+            batch.update({
+                'itm': {
+                    'label': itm_labels,
+                    'image': itm_image,
+                }
+            })
+
+            # MLM
+            assert mlm_collator is not None
+            mlm_input = mlm_collator(text_list)
+            batch.update({'mlm': mlm_input})
+
+        return batch
+
+    return collate
+
+
 class HFDataset(Dataset):
-    def __init__(self, name, subset, split, transforms=None, img_key=None, caption_key=None, tokenizer_name=None):
+    def __init__(
+        self,
+        name,
+        subset,
+        split,
+        transforms=None,
+        img_key=None,
+        caption_key=None,
+        tokenizer_name=None,
+        add_pad_and_mask_tokens=False,
+    ):
         dataset = load_dataset(name, subset, split=split)
 
         self.length = len(dataset)
@@ -42,7 +105,12 @@ class HFDataset(Dataset):
         self.transforms = transforms
         logging.debug('Done loading data.')
 
-        self.tokenize = HFTokenizer(tokenizer_name) if tokenizer_name else tokenize
+        self.tokenize = tokenize
+        if tokenizer_name:
+            self.tokenize = HFTokenizer(
+                tokenizer_name,
+                add_pad_and_mask_tokens=add_pad_and_mask_tokens,
+            )
 
     def __len__(self):
         return self.length
@@ -52,7 +120,16 @@ class HFDataset(Dataset):
 
 
 class CsvDataset(Dataset):
-    def __init__(self, input_filename, transforms, img_key, caption_key, sep="\t", tokenizer_name=None):
+    def __init__(
+        self,
+        input_filename,
+        transforms,
+        img_key,
+        caption_key,
+        sep="\t",
+        tokenizer_name=None,
+        add_pad_and_mask_tokens=False,
+    ):
         logging.debug(f'Loading csv data from {input_filename}.')
         df = pd.read_csv(input_filename, sep=sep)
 
@@ -61,7 +138,12 @@ class CsvDataset(Dataset):
         self.transforms = transforms
         logging.debug('Done loading data.')
 
-        self.tokenize = HFTokenizer(tokenizer_name) if tokenizer_name else tokenize
+        self.tokenize = tokenize
+        if tokenizer_name:
+            self.tokenize = HFTokenizer(
+                tokenizer_name,
+                add_pad_and_mask_tokens=add_pad_and_mask_tokens,
+            )
 
     def __len__(self):
         return len(self.captions)
@@ -69,9 +151,10 @@ class CsvDataset(Dataset):
     def __getitem__(self, idx):
         images = self.transforms(Image.open(str(self.images[idx])))
         # negative image used for ITM objective
+        # TODO: move neg_images to a separate transform
         neg_images = self.transforms(Image.open(str(self.images[(idx + 1) % len(self.images)])))
-        texts, padding_masks = self.tokenize([str(self.captions[idx])])
-        return images, neg_images, texts[0], padding_masks[0]
+        texts = self.tokenize([str(self.captions[idx])])[0]
+        return images, neg_images, texts
 
 
 class SharedEpoch:
@@ -424,64 +507,21 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
 def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name=None):
     input_filename = args.train_data if is_train else args.val_data
     assert input_filename
+    is_flava = args.model.startswith('flava')
+
     dataset = CsvDataset(
         input_filename,
         preprocess_fn,
         img_key=args.csv_img_key,
         caption_key=args.csv_caption_key,
         sep=args.csv_separator,
-		tokenizer_name=tokenizer_name)
+		tokenizer_name=tokenizer_name,
+        add_pad_and_mask_tokens=is_flava,
+    )
     num_samples = len(dataset)
     sampler = DistributedSampler(dataset) if args.distributed and is_train else None
     shuffle = is_train and sampler is None
 
-    mlm_collator = None
-    # TODO(gmittal): only turn on DataCollatorForLanguageModeling
-    # when MLM/FLAVA is active.
-    if isinstance(dataset.tokenize, HFTokenizer):
-        hf_tokenizer = dataset.tokenize.tokenizer
-        # The following special tokens are required for
-        # the data collator to work correctly.
-        assert getattr(hf_tokenizer, 'pad_token', False)
-        assert getattr(hf_tokenizer, 'mask_token', False)
-        mlm_collator = DataCollatorForLanguageModeling(
-            tokenizer=hf_tokenizer,
-            mlm=True,
-            mlm_probability=0.15,
-        )
-
-    def collate(example_list):
-        image, neg_image, text, input_mask = zip(*example_list)
-        image = torch.stack(image)
-        neg_image = torch.stack(neg_image)
-        input_mask = torch.stack(input_mask)
-        batch = {
-            'image': image,
-            'text': torch.stack(text),
-            'text_input_mask': input_mask,
-        }
-
-        # ITM
-        itm_prob = 0.1
-        itm_labels = torch.bernoulli(torch.ones(len(image)) * (1 - itm_prob))
-        corrupt_idx = torch.where(itm_labels == 0)
-        itm_image = image.clone()
-        itm_image[corrupt_idx] = neg_image[corrupt_idx]
-        batch.update({
-            'itm': {
-                'label': itm_labels,
-                'image': itm_image,
-            }
-        })
-
-        # MLM
-        if mlm_collator is not None:
-            mlm_input = mlm_collator(text)
-            batch.update({'mlm': mlm_input})
-        return batch
-
-    # TODO(gmittal): MLM will *randomly* mask tokens on validation set
-    # which will lead to weird eval metrics. ITM has same problem.
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -489,7 +529,44 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name=None)
         num_workers=args.workers,
         pin_memory=True,
         sampler=sampler,
-        collate_fn=collate,
+        collate_fn=get_collate_fn(dataset, is_flava),
+        drop_last=is_train,
+    )
+    dataloader.num_samples = num_samples
+    dataloader.num_batches = len(dataloader)
+
+    return DataInfo(dataloader, sampler)
+
+
+def get_hf_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer_name=None):
+    dataset_str = args.train_data if is_train else args.val_data
+    identifers = dataset_str.split(':')
+    assert 1 <= len(identifiers) <= 2, f'Invalid dataset string: {dataset_str}'
+    dataset_name = identifers[0]
+    subset = identifiers[1] if len(identifers) == 2 else None
+    split = 'train' if is_train else 'validation'
+    is_flava = args.model.startswith('flava')
+
+    dataset = HFDataset(
+        dataset_name,
+        subset,
+        split,
+        transforms=preprocess_fn,
+        img_key=args.csv_img_key,
+        caption_key=args.csv_caption_key,
+		tokenizer_name=tokenizer_name)
+    num_samples = len(dataset)
+    sampler = DistributedSampler(dataset) if args.distributed and is_train else None
+    shuffle = is_train and sampler is None
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=shuffle,
+        num_workers=args.workers,
+        pin_memory=True,
+        sampler=sampler,
+        collate_fn=get_collate_fn(dataset, is_flava),
         drop_last=is_train,
     )
     dataloader.num_samples = num_samples
@@ -515,6 +592,7 @@ class SyntheticDataset(Dataset):
     def __getitem__(self, idx):
         if self.transform is not None:
             image = self.transform(self.image)
+        # TODO(gmittal): make this usable like other datasets
         return image, self.preprocess_txt(self.caption)
 
 
@@ -546,6 +624,8 @@ def get_dataset_fn(data_path, dataset_type):
         return get_wds_dataset
     elif dataset_type == "csv":
         return get_csv_dataset
+    elif dataset_type == "hf":
+        return get_hf_dataset
     elif dataset_type == "synthetic":
         return get_synthetic_dataset
     elif dataset_type == "auto":

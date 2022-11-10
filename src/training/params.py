@@ -318,7 +318,12 @@ def parse_args(args):
         action='store_true',
         help="Freeze BatchNorm running stats in image tower for any locked layers.",
     )
-
+    parser.add_argument(
+        "--context-length",
+        type=int,
+        default=77,
+        help="Number of tokens in the context of the language encoder.",
+    )
 
     args = parser.parse_args(args)
 
