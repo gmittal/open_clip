@@ -251,14 +251,37 @@ class FLAVA(nn.Module):
         self.language.grad_checkpointing(enable)
         self.multimodal.grad_checkpointing(enable)
 
-    def encode_image(self, image, return_sequences=False):
-        pass
+    def encode_image(self, image, normalize=False):
+        features = self.visual(image)
+        features = self.image_projection(features[:, 0, :])
+        return F.normalize(features, dim=-1) if normalize else features
 
-    def encode_text(self, text, return_sequences=False):
-        pass
+    def encode_text(self, text, padding_mask=None, normalize=False):
+        embed = self.text_embedding(text)
+        features = self.language(embed, key_padding_mask=padding_mask)
+        features = self.text_projection(features[:, 0, :])
+        return F.normalize(features, dim=-1) if normalize else features
 
-    def encode_multimodal(self, image, text, return_sequences=False):
-        pass
+    def encode_multimodal(self, image, text, padding_mask=None, normalize=False):
+        text_embed = self.text_embedding(text)
+        text_hidden = self.language(text_embed, key_padding_mask=padding_mask)
+
+        image_hidden = self.visual(image)
+
+        mm_image_hidden = self.image_to_mm_projection(image_hidden[:, 1:, :])
+        mm_text_hidden = self.text_to_mm_projection(text_hidden[:, 1:, :])
+
+        mm_padding_mask = None
+        if padding_mask is not None:
+            mm_padding_mask = ~(padding_mask.type(torch.bool))
+            im_hidden_length = image_hidden.shape[1] - 1  # ignore CLS_I token
+            im_pad_mask = torch.zeros(mm_padding_mask.shape[0], im_hidden_length, dtype=torch.bool, device=mm_padding_mask.device)
+            mm_padding_mask = torch.cat([im_pad_mask, mm_padding_mask], dim=1)
+
+        mm_inputs = torch.cat([mm_image_hidden, mm_text_hidden], dim=1)
+        mm_hidden = self.multimodal(mm_inputs, key_padding_mask=mm_padding_mask)
+        mm_features = self.mm_projection(mm_hidden[:, 0, :])
+        return F.normalize(mm_features, dim=-1) if normalize else mm_features
 
     def forward(
         self,
