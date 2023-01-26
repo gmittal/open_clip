@@ -38,7 +38,7 @@ def parse_args(args):
     )
     parser.add_argument(
         "--dataset-type",
-        choices=["webdataset", "csv", "synthetic", "auto"],
+        choices=["webdataset", "csv", "synthetic", "auto", "hf"],
         default="auto",
         help="Which type of dataset to process."
     )
@@ -170,6 +170,12 @@ def parse_args(args):
         help="Load imagenet pretrained weights for image tower backbone if available.",
     )
     parser.add_argument(
+        "--pretrained-hf",
+        default=False,
+        action='store_true',
+        help="Load pretrained weights for HF text tower backbone if available.",
+    )
+    parser.add_argument(
         "--lock-image",
         default=False,
         action='store_true',
@@ -242,7 +248,7 @@ def parse_args(args):
         help="torch.jit.trace the model for inference / eval only",
     )
     parser.add_argument(
-        "--accum-freq", type=int, default=1, help="Update the model every --acum-freq steps."
+        "--accum-freq", type=int, default=1, help="Update the model every --accum-freq steps."
     )
     # arguments for distributed training
     parser.add_argument(
@@ -333,6 +339,61 @@ def parse_args(args):
         help="Log every n steps to tensorboard/console/wandb.",
     )
 
+    # FLAVA arguments
+    parser.add_argument(
+        "--flava-contrastive-loss-weight",
+        type=float,
+        default=1.0,
+        help="Weight assigned to contrastive loss when training FLAVA."
+    )
+    parser.add_argument(
+        "--flava-itm-loss-weight",
+        type=float,
+        default=1.0,
+        help="Weight assigned to ITM loss when training FLAVA."
+    )
+    parser.add_argument(
+        "--flava-mlm-loss-weight",
+        type=float,
+        default=1.0,
+        help="Weight assigned to MLM loss when training FLAVA."
+    )
+    parser.add_argument(
+        "--flava-mae-loss-weight",
+        type=float,
+        default=1.0,
+        help="Weight assigned to MAE loss when training FLAVA."
+    )
+    parser.add_argument(
+        "--flava-mlm-prob",
+        type=float,
+        default=0.15,
+        help="MLM masking probability when training FLAVA."
+    )
+    parser.add_argument(
+        "--flava-itm-prob",
+        type=float,
+        default=0.1,
+        help="ITM negative probability when training FLAVA."
+    )
+    parser.add_argument(
+        "--flava-mae-norm-pix-loss",
+        type=bool,
+        default=True,
+        help="If True, normalize MAE loss by number of pixels in image."
+    )
+    parser.add_argument(
+        "--flava-unimodal-mlm",
+        type=str,
+        default=None,
+        help="Dataset used for unimodal text encoder pre-training with MLM."
+    )
+    parser.add_argument(
+        "--flava-unimodal-mae",
+        type=bool,
+        default=False,
+        help="Dataset used for unimodal image encoder pre-training with MAE."
+    )
 
     args = parser.parse_args(args)
 

@@ -12,6 +12,8 @@ import torch
 from .constants import OPENAI_DATASET_MEAN, OPENAI_DATASET_STD
 from .model import CLIP, CustomTextCLIP, convert_weights_to_lp, convert_to_custom_text_state_dict,\
     resize_pos_embed, get_cast_dtype
+from .flava_model import FLAVA
+from .loss import ClipLoss, FlavaLoss
 from .openai import load_openai_model
 from .pretrained import is_pretrained_cfg, get_pretrained_cfg, download_pretrained, list_pretrained_tags_by_model
 from .transform import image_transform
@@ -72,7 +74,10 @@ def get_model_config(model_name):
 
 def get_tokenizer(model_name):
     config = get_model_config(model_name)
-    tokenizer = HFTokenizer(config['text_cfg']['hf_tokenizer_name']) if 'hf_tokenizer_name' in config['text_cfg'] else tokenize
+    tokenizer = HFTokenizer(
+        tokenizer_name=config['text_cfg']['hf_tokenizer_name'],
+        context_length=config['text_cfg']['context_length'],
+    ) if 'hf_tokenizer_name' in config['text_cfg'] else tokenize
     return tokenizer
 
 
@@ -148,8 +153,11 @@ def create_model(
 
         cast_dtype = get_cast_dtype(precision)
         custom_text = model_cfg.pop('custom_text', False) or force_custom_text or ('hf_model_name' in model_cfg.get('text_cfg', {}))
+        is_flava = model_name.startswith('flava')
 
-        if custom_text:
+        if is_flava:
+            model = FLAVA(**model_cfg, cast_dtype=cast_dtype)
+        elif custom_text:
             if 'hf_model_name' in model_cfg.get('text_cfg', {}):
                 model_cfg['text_cfg']['hf_model_pretrained'] = pretrained_hf
             model = CustomTextCLIP(**model_cfg, cast_dtype=cast_dtype)
@@ -187,6 +195,30 @@ def create_model(
             model = torch.jit.script(model)
 
     return model
+
+
+def create_loss(args):
+    if args.model.lower().startswith("flava"):
+        return FlavaLoss(
+            contrastive_loss_weight=args.flava_contrastive_loss_weight,
+            itm_loss_weight=args.flava_itm_loss_weight,
+            mlm_loss_weight=args.flava_mlm_loss_weight,
+            mae_loss_weight=args.flava_mae_loss_weight,
+            mae_norm_pix_loss=args.flava_mae_norm_pix_loss,
+            local_loss=args.local_loss,
+            gather_with_grad=args.gather_with_grad,
+            cache_labels=True,
+            rank=args.rank,
+            world_size=args.world_size,
+            use_horovod=args.horovod)
+
+    return ClipLoss(
+        local_loss=args.local_loss,
+        gather_with_grad=args.gather_with_grad,
+        cache_labels=True,
+        rank=args.rank,
+        world_size=args.world_size,
+        use_horovod=args.horovod)
 
 
 def create_model_and_transforms(

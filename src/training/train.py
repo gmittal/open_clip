@@ -13,7 +13,7 @@ try:
 except ImportError:
     wandb = None
 
-from open_clip import ClipLoss, get_cast_dtype
+from open_clip import get_cast_dtype
 from .distributed import is_master
 from .zero_shot import zero_shot_eval
 from .precision import get_autocast
@@ -38,6 +38,28 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
+class Batch(dict):
+    """Batch wrapper for a dictionary of tensors."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(self, *args, **kwargs)
+
+    def size(self):
+        if self.keys():
+            k = list(self.keys())[0]
+            return len(self[k])
+        return 0
+
+    def to(self, *, device, non_blocking=False, dtypes={}):
+        for k, v in self.items():
+            if isinstance(v, torch.Tensor):
+                dtype = dtypes.get(k, v.dtype)
+                self[k] = v.to(device=device, non_blocking=non_blocking, dtype=dtype)
+            elif isinstance(v, dict):
+                self[k] = Batch(v).to(device=device, non_blocking=non_blocking, dtypes=dtypes)
+        return self
+
+
 def unwrap_model(model):
     if hasattr(model, 'module'):
         return model.module
@@ -52,29 +74,33 @@ def backward(total_loss, scaler):
         total_loss.backward()
 
 
-def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None):
+def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args, tb_writer=None):
     device = torch.device(args.device)
     autocast = get_autocast(args.precision)
     cast_dtype = get_cast_dtype(args.precision)
+    is_flava = args.model.startswith('flava')
 
     model.train()
-    loss = ClipLoss(
-        local_loss=args.local_loss,
-        gather_with_grad=args.gather_with_grad,
-        cache_labels=True,
-        rank=args.rank,
-        world_size=args.world_size,
-        use_horovod=args.horovod)
 
     data['train'].set_epoch(epoch)  # set epoch in process safe manner via sampler or shared_epoch
     dataloader = data['train'].dataloader
     num_batches_per_epoch = dataloader.num_batches // args.accum_freq
     sample_digits = math.ceil(math.log(dataloader.num_samples + 1, 10))
 
+    # FLAVA unimodal dataloaders
+    # TODO: is set_epoch necessary?
+    if is_flava and args.flava_unimodal_mae:
+        data['flava-mae'].set_epoch(epoch)
+        mae_dataloader = iter(data['flava-mae'].dataloader)
+    if is_flava and args.flava_unimodal_mlm:
+        data['flava-mlm'].set_epoch(epoch)
+        mlm_dataloader = iter(data['flava-mlm'].dataloader)
+
     if args.accum_freq > 1:
+        assert not args.model.startswith('flava'), 'FLAVA does not support gradient accumulation'
         accum_images, accum_texts, accum_image_features, accum_text_features = [], [], [], []
 
-    loss_m = AverageMeter()
+    losses_m = {}
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     end = time.time()
@@ -85,24 +111,66 @@ def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_w
         if not args.skip_scheduler:
             scheduler(step)
 
-        images, texts = batch
-        images = images.to(device=device, dtype=cast_dtype, non_blocking=True)
-        texts = texts.to(device=device, non_blocking=True)
+        dtypes = {'image': cast_dtype}
+        batch = Batch(**batch).to(device=device, non_blocking=True, dtypes=dtypes)
+
+        # FLAVA unimodal batches
+        if is_flava and args.flava_unimodal_mae:
+            try:
+                mae_batch = next(mae_dataloader)
+            except:
+                mae_dataloader = iter(data['flava-mae'].dataloader)
+                mae_batch = next(mae_dataloader)
+            mae_batch = Batch(**mae_batch).to(device=device, non_blocking=True, dtypes=dtypes)
+
+        if is_flava and args.flava_unimodal_mlm:
+            try:
+                mlm_batch = next(mlm_dataloader)
+            except:
+                mlm_dataloader = iter(data['flava-mlm'].dataloader)
+                mlm_batch = next(mlm_dataloader)
+            mlm_batch = Batch(**mlm_batch).to(device=device, non_blocking=True, dtypes=dtypes)
 
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
 
         if args.accum_freq == 1:
             with autocast():
-                image_features, text_features, logit_scale = model(images, texts)
-                total_loss = loss(image_features, text_features, logit_scale)
+                model_out = model(**batch)
+                assert isinstance(model_out, dict)
+                losses = loss(**model_out)
+                if isinstance(losses, dict):
+                    total_loss = sum(losses.values())
+                    losses["loss"] = total_loss
+                else:
+                    total_loss = losses
+                    losses = {"loss": losses}
 
             backward(total_loss, scaler)
+
+            # FLAVA unimodal forward passes
+            if is_flava and args.flava_unimodal_mlm:
+                mlm_out = model.forward_mlm(**mlm_batch)
+                mlm_losses = loss.forward_mlm(**mlm_out)
+                total_mlm_loss = sum(mlm_losses.values())
+                losses["unimodal_mlm_loss"] = total_mlm_loss
+                backward(total_mlm_loss, scaler)
+
+            if is_flava and args.flava_unimodal_mae:
+                mae_out = model.forward_mae(**mae_batch)
+                mae_losses = loss.forward_mae(**mae_out)
+                total_mae_loss = sum(mae_losses.values())
+                losses["unimodal_mae_loss"] = total_mae_loss
+                backward(total_mae_loss, scaler)
+
         else:
             # First, cache the features without any gradient tracking.
             with torch.no_grad():
                 with autocast():
-                    chunk_image_features, chunk_text_features, _ = model(images, texts)
+                    output = model(**batch)
+                    assert isinstance(output, dict)
+                    chunk_image_features = output["image_features"]
+                    chunk_text_features = output["text_features"]
                 accum_image_features.append(chunk_image_features)
                 accum_text_features.append(chunk_text_features)
 
@@ -122,12 +190,19 @@ def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_w
                 images = accum_images[j]
                 texts = accum_texts[j]
                 with autocast():
-                    chunk_image_features, chunk_text_features, logit_scale = model(images, texts)
+                    output = model(image=images, text=texts)
+                    chunk_image_features, chunk_text_features, logit_scale = output['image_features'], \
+                                                                             output['text_features'], \
+                                                                             output['logit_scale']
                     image_features = torch.cat(
                         accum_image_features[:j] + [chunk_image_features] + accum_image_features[j + 1:])
                     text_features = torch.cat(
                         accum_text_features[:j] + [chunk_text_features] + accum_text_features[j + 1:])
-                    total_loss = loss(image_features, text_features, logit_scale)
+                    total_loss = loss(
+                        image_features=image_features,
+                        text_features=text_features,
+                        logit_scale=logit_scale,
+                    )
                 backward(total_loss, scaler)
 
         if scaler is not None:
@@ -160,33 +235,43 @@ def train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, tb_w
         batch_time_m.update(time.time() - end)
         end = time.time()
         batch_count = i_accum + 1
-        if is_master(args) and (i_accum % args.log_every_n_steps or batch_count == num_batches_per_epoch):
-            batch_size = len(images)
+        if is_master(args) and ((i_accum % args.log_every_n_steps) == 0 or batch_count == num_batches_per_epoch):
+            batch_size = batch.size()
             num_samples = batch_count * batch_size * args.accum_freq * args.world_size
             samples_per_epoch = dataloader.num_samples
             percent_complete = 100.0 * batch_count / num_batches_per_epoch
 
             # NOTE loss is coarsely sampled, just master node and per log update
-            loss_m.update(total_loss.item(), batch_size)
+            for key, val in losses.items():
+                if key not in losses_m:
+                    losses_m[key] = AverageMeter()
+                losses_m[key].update(val.item(), batch_size)
+            logit_scale = model_out['logit_scale']
             logit_scale_scalar = logit_scale.item()
+            loss_log = " ".join(
+                [
+                    f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})"
+                    for loss_name, loss_m in losses_m.items()
+                ]
+            )
             logging.info(
                 f"Train Epoch: {epoch} [{num_samples:>{sample_digits}}/{samples_per_epoch} ({percent_complete:.0f}%)] "
-                f"Loss: {loss_m.val:#.5g} ({loss_m.avg:#.4g}) "
                 f"Data (t): {data_time_m.avg:.3f} "
                 f"Batch (t): {batch_time_m.avg:.3f}, {args.accum_freq * args.batch_size * args.world_size / batch_time_m.val:#g}/s "
                 f"LR: {optimizer.param_groups[0]['lr']:5f} "
-                f"Logit Scale: {logit_scale_scalar:.3f}"
+                f"Logit Scale: {logit_scale_scalar:.3f} " + loss_log
             )
 
             # Save train loss / etc. Using non avg meter values as loggers have their own smoothing
             log_data = {
-                "loss": loss_m.val,
                 "data_time": data_time_m.val,
                 "batch_time": batch_time_m.val,
                 "samples_per_second": args.accum_freq * args.batch_size * args.world_size / batch_time_m.val,
                 "scale": logit_scale_scalar,
                 "lr": optimizer.param_groups[0]["lr"]
             }
+            log_data.update({name:val.val for name,val in losses_m.items()})
+
             for name, val in log_data.items():
                 name = "train/" + name
                 if tb_writer is not None:
@@ -225,21 +310,22 @@ def evaluate(model, data, epoch, args, tb_writer=None):
         all_image_features, all_text_features = [], []
         with torch.no_grad():
             for i, batch in enumerate(dataloader):
-                images, texts = batch
-                images = images.to(device=device, dtype=cast_dtype, non_blocking=True)
-                texts = texts.to(device=device, non_blocking=True)
+                batch = Batch(**batch).to(device=device, non_blocking=True, dtypes={'image': cast_dtype})
 
                 with autocast():
-                    image_features, text_features, logit_scale = model(images, texts)
+                    output = model(**batch)
                     # features are accumulated in CPU tensors, otherwise GPU memory exhausted quickly
                     # however, system RAM is easily exceeded and compute time becomes problematic
+                    image_features, text_features, logit_scale = output['image_features'], \
+                                                                 output['text_features'], \
+                                                                 output['logit_scale']
                     all_image_features.append(image_features.cpu())
                     all_text_features.append(text_features.cpu())
                     logit_scale = logit_scale.mean()
                     logits_per_image = logit_scale * image_features @ text_features.t()
                     logits_per_text = logits_per_image.t()
 
-                    batch_size = images.shape[0]
+                    batch_size = batch.size()
                     labels = torch.arange(batch_size, device=device).long()
                     total_loss = (
                         F.cross_entropy(logits_per_image, labels) +
