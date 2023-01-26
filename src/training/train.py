@@ -150,14 +150,14 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args
 
             # FLAVA unimodal forward passes
             if is_flava and args.flava_unimodal_mlm:
-                mlm_out = model.forward_mlm(**mlm_batch)
+                mlm_out = model(**mlm_batch, unimodal_mlm=True)
                 mlm_losses = loss.forward_mlm(**mlm_out)
                 total_mlm_loss = sum(mlm_losses.values())
                 losses["unimodal_mlm_loss"] = total_mlm_loss
                 backward(total_mlm_loss, scaler)
 
             if is_flava and args.flava_unimodal_mae:
-                mae_out = model.forward_mae(**mae_batch)
+                mae_out = model(**mae_batch, unimodal_mae=True)
                 mae_losses = loss.forward_mae(**mae_out)
                 total_mae_loss = sum(mae_losses.values())
                 losses["unimodal_mae_loss"] = total_mae_loss

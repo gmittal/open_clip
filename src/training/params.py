@@ -303,6 +303,12 @@ def parse_args(args):
         help="Enable static graph optimization for DDP in PyTorch >= 1.11.",
     )
     parser.add_argument(
+        "--ddp-find-unused-parameters",
+        default=False,
+        action='store_true',
+        help="Enable unused parameters for DDP.",
+    )
+    parser.add_argument(
         "--no-set-device-rank",
         default=False,
         action="store_true",

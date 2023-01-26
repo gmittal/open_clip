@@ -396,18 +396,7 @@ class FLAVA(nn.Module):
             'image': image,
         }
 
-    def forward(
-        self,
-        *,
-        image,
-        text,
-        text_masked,
-        itm_text,
-
-        # passthrough
-        mlm_labels,
-        itm_labels,
-    ):
+    def forward_flava(self, *, image, text, text_masked, itm_text, mlm_labels, itm_labels):
         # Language features
         h_text = self.text(text)
         cls_t = h_text[:, 0, :]
@@ -486,3 +475,40 @@ class FLAVA(nn.Module):
             'mae_mask': mae_mask,
             'image': image,
         }
+
+    def forward(
+        self,
+        *,
+        image=None,
+        text=None,
+        text_masked=None,
+        itm_text=None,
+
+        # passthrough
+        mlm_labels=None,
+        itm_labels=None,
+
+        # unimodal flags
+        unimodal_mae=False,
+        unimodal_mlm=False,
+    ):
+        if unimodal_mlm:
+            assert text_masked is not None and mlm_labels is not None
+            return self.forward_mlm(text_masked=text_masked, mlm_labels=mlm_labels)
+        elif unimodal_mae:
+            assert image is not None
+            return self.forward_mae(image=image)
+        else:
+            assert image is not None and \
+                   text is not None and \
+                   itm_text is not None and \
+                   mlm_labels is not None and \
+                   itm_labels is not None
+            return self.forward_flava(
+                image=image,
+                text=text,
+                text_masked=text_masked,
+                itm_text=itm_text,
+                mlm_labels=mlm_labels,
+                itm_labels=itm_labels,
+            )
