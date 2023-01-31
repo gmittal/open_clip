@@ -2,13 +2,13 @@
   "embed_dim": 512,
   "vision_cfg": {
       "image_size": 224,
-      "layers": 4,
+      "layers": 8,
       "width": 512,
-      "head_width": 128,
+      "head_width": 64,
       "patch_size": 16,
 
       "mae_mask_ratio": 0.75,
-      "mae_decoder_layers": 2,
+      "mae_decoder_layers": 4,
       "mae_decoder_width": 512,
       "mae_decoder_heads": 4
   },
@@ -18,8 +18,8 @@
       "hf_model_pretrained": false,
       "hf_model_config": {
           "hidden_size": 512,
-          "num_hidden_layers": 4,
-          "num_attention_heads": 4,
+          "num_hidden_layers": 8,
+          "num_attention_heads": 8,
           "intermediate_size": 2048,
           "max_position_embeddings": 128
       },
@@ -28,8 +28,8 @@
       "proj": "linear"
   },
   "multimodal_cfg": {
-    "layers": 4,
+    "layers": 8,
     "width": 512,
-    "heads": 4
+    "heads": 8
   }
 }
