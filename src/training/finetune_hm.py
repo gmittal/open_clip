@@ -1,7 +1,9 @@
 import argparse
 import os
+import random
 import sys
 
+import numpy as np
 import pandas as pd
 import torch
 from torch import nn
@@ -11,13 +13,21 @@ from tqdm import tqdm
 
 import open_clip
 from open_clip.factory import get_tokenizer
+from training.data import get_imagenet
 from training.scheduler import cosine_lr
 from training.train import AverageMeter
+from training.zero_shot import zero_shot_eval
 
 try:
     import evaluate
 except ImportError:
     raise ImportError("Please install HF evaluate: pip install evaluate")
+
+
+def random_seed(seed=42, rank=0):
+    torch.manual_seed(seed + rank)
+    np.random.seed(seed + rank)
+    random.seed(seed + rank)
 
 
 def parse_args(args):
@@ -32,18 +42,18 @@ def parse_args(args):
         "--workers", type=int, default=4, help="Number of dataloader workers per GPU."
     )
     parser.add_argument(
-        "--batch-size", type=int, default=32, help="Batch size per GPU."
+        "--batch-size", type=int, default=128, help="Batch size per GPU."
     )
     parser.add_argument(
-        "--epochs", type=int, default=10, help="Number of epochs to train for."
+        "--epochs", type=int, default=1000, help="Number of epochs to train for."
     )
-    parser.add_argument("--lr", type=float, default=3e-5, help="Learning rate.")
+    parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
     parser.add_argument("--beta1", type=float, default=0.9, help="Adam beta 1.")
     parser.add_argument("--beta2", type=float, default=0.999, help="Adam beta 2.")
     parser.add_argument("--eps", type=float, default=1e-8, help="Adam epsilon.")
-    parser.add_argument("--wd", type=float, default=0.0, help="Weight decay.")
+    parser.add_argument("--wd", type=float, default=0.01, help="Weight decay.")
     parser.add_argument(
-        "--warmup", type=int, default=200, help="Number of steps to warmup for."
+        "--warmup", type=int, default=2000, help="Number of steps to warmup for."
     )
     parser.add_argument(
         "--val-frequency", type=int, default=30, help="How often to run evaluation with val data."
@@ -55,7 +65,7 @@ def parse_args(args):
         "--early-stop-threshold", type=float, default=0.0, help="Early stopping threshold."
     )
     parser.add_argument(
-        "--early-stop-metric-name", type=str, default="accuracy", help="Early stopping metric name."
+        "--early-stop-metric-name", type=str, default="roc_auc", help="Early stopping metric name."
     )
     parser.add_argument(
         "--precision",
@@ -85,7 +95,7 @@ def parse_args(args):
 
 class EarlyStopping:
 
-    def __init__(self, patience=5, threshold=0.0, metric_name="accuracy"):
+    def __init__(self, patience=5, threshold=0.0, metric_name="roc_auc"):
         self.patience = patience
         self.threshold = threshold
         self.patience_counter = 0
@@ -170,7 +180,7 @@ class CLIPMultimodalClassifier(nn.Module):
     def forward(self, image, text):
         # CLIP doesn't have a multimodal encoder, so we concatenate the features
         text_features = self.encoder.encode_text(text)
-        image_features = self.encoder_encode_image(image)
+        image_features = self.encoder.encode_image(image)
         multimodal_features = torch.cat([image_features, text_features], dim=-1)
         logits = self.logits_proj(multimodal_features)
         return logits
@@ -203,7 +213,7 @@ def get_task_dataloaders(transforms, args):
 
 def compute_metrics(model, dataloader, device, args):
     model.eval()
-    metric = evaluate.load("accuracy")
+    metric = evaluate.load("roc_auc")
     val_loss = 0
     samples_seen = 0
     for batch in dataloader:
@@ -215,11 +225,11 @@ def compute_metrics(model, dataloader, device, args):
             logits = model(image, text)
             logits = logits.view(-1)
             label = label.view(-1).float()
-            predictions = torch.sigmoid(logits) > 0.5
+            pred_scores = torch.sigmoid(logits)
             batch_val_loss = nn.functional.binary_cross_entropy_with_logits(logits, label, reduction='sum')
         val_loss += batch_val_loss.item()
         metric.add_batch(
-            predictions=predictions.cpu().numpy(),
+            prediction_scores=pred_scores.cpu().numpy(),
             references=label.cpu().numpy(),
         )
     model.train()
@@ -253,6 +263,7 @@ def train_one_epoch(model, data, epoch, optimizer, scheduler, early_stop, device
 
         if (i % args.val_frequency) == 0 and i > 0:
             metrics = compute_metrics(model, data["validation"], device, args)
+            print(metrics)
             end_training = early_stop.step(metrics)
             if end_training:
                 progress_bar.close()
@@ -260,18 +271,21 @@ def train_one_epoch(model, data, epoch, optimizer, scheduler, early_stop, device
 
     progress_bar.close()
     metrics = compute_metrics(model, data["validation"], device, args)
+    print(metrics)
     end_training = early_stop.step(metrics)
     return metrics, end_training
 
 
 def main(args):
     args = parse_args(args)
+    random_seed(args.seed, 0)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model, preprocess_train, preprocess_val = open_clip.factory.create_model_and_transforms(
         args.model,
         args.pretrained,
         precision=args.precision,
         device=device,
+        pretrained_hf=False,
     )
     model_cfg = open_clip.factory.get_model_config(args.model)
     embed_dim = model_cfg["embed_dim"]
