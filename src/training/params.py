@@ -400,6 +400,18 @@ def parse_args(args):
         default=False,
         help="Dataset used for unimodal image encoder pre-training with MAE."
     )
+    parser.add_argument(
+        "--flava-unimodal-mae-batch-size",
+        type=int,
+        default=14,
+        help="Batch size per GPU for unimodal MAE."
+    )
+    parser.add_argument(
+        "--flava-unimodal-mlm-batch-size",
+        type=int,
+        default=14,
+        help="Batch size per GPU for unimodal MLM."
+    )
 
     args = parser.parse_args(args)
 

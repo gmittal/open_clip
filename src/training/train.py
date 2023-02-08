@@ -88,7 +88,6 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args
     sample_digits = math.ceil(math.log(dataloader.num_samples + 1, 10))
 
     # FLAVA unimodal dataloaders
-    # TODO: is set_epoch necessary?
     if is_flava and args.flava_unimodal_mae:
         data['flava-mae'].set_epoch(epoch)
         mae_dataloader = iter(data['flava-mae'].dataloader)

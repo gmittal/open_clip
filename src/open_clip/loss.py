@@ -134,7 +134,10 @@ class MLMLoss(nn.Module):
         labels = labels.reshape(-1)
 
         # only compute loss on masked logits
-        masked_idx = torch.where(labels != self.ignore_index)
+        try:
+            masked_idx = torch.where(labels != self.ignore_index)
+        except RuntimeError:
+            import pdb; pdb.set_trace()
         masked_logits = logits[masked_idx]
         masked_labels = labels[masked_idx]
 
@@ -177,7 +180,8 @@ class MAELoss(nn.Module):
         pred: [N, L, p*p*3]
         mask: [N, L], 0 is keep, 1 is remove,
         """
-        patch_size = int((pred.shape[-1] / 3)**0.5)  # TODO: this feels hacky
+        patch_area = pred.shape[-1] / 3
+        patch_size = int(patch_area**0.5)
         target = self.patchify(imgs, patch_size)
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)

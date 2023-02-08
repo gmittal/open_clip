@@ -396,7 +396,7 @@ class FLAVA(nn.Module):
             'image': image,
         }
 
-    def forward_flava(self, *, image, text, text_masked, itm_text, mlm_labels, itm_labels):
+    def forward_flava(self, *, image, text, text_masked, itm_neg_text_idx, mlm_labels, itm_labels):
         # Language features
         h_text = self.text(text)
         cls_t = h_text[:, 0, :]
@@ -425,7 +425,7 @@ class FLAVA(nn.Module):
         mm_h_text = self.text_to_mm_projection(h_text)
         mm_h_masked_image = self.image_to_mm_projection(h_masked_image)
         mm_h_masked_text = self.text_to_mm_projection(h_masked_text)
-        mm_h_itm_text = self.text_to_mm_projection(self.text(itm_text))  # TODO: save text transformer fwd pass by using indices
+        mm_h_itm_text = self.text_to_mm_projection(h_text[itm_neg_text_idx])
 
         # Image-text matching
         mm_itm_input = torch.cat([mm_h_image, mm_h_itm_text], dim=1)
@@ -456,7 +456,7 @@ class FLAVA(nn.Module):
         mm_mae_input = torch.cat([mm_image_with_mask_tokens, mm_h_text], dim=1)
         h_m_mae = self.multimodal(mm_mae_input, attn_mask=mm_attn_mask)
         mm_masked_patches_pred = h_m_mae[:, 1:mm_image_with_mask_tokens.shape[1] + 1, :]
-        mm_mae_logits = self.mm_mae_head(self.mm_projection(mm_masked_patches_pred[:, 1:, :])) # remove cls token
+        mm_mae_logits = self.mm_mae_head(self.mm_projection(mm_masked_patches_pred[:, 1:, :]))  # remove cls token
 
         return {
             # contrastive outputs
@@ -482,7 +482,7 @@ class FLAVA(nn.Module):
         image=None,
         text=None,
         text_masked=None,
-        itm_text=None,
+        itm_neg_text_idx=None,
 
         # passthrough
         mlm_labels=None,
@@ -501,14 +501,14 @@ class FLAVA(nn.Module):
         else:
             assert image is not None and \
                    text is not None and \
-                   itm_text is not None and \
+                   itm_neg_text_idx is not None and \
                    mlm_labels is not None and \
                    itm_labels is not None
             return self.forward_flava(
                 image=image,
                 text=text,
                 text_masked=text_masked,
-                itm_text=itm_text,
+                itm_neg_text_idx=itm_neg_text_idx,
                 mlm_labels=mlm_labels,
                 itm_labels=itm_labels,
             )
