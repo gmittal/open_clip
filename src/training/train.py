@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import math
@@ -134,6 +135,29 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args
         optimizer.zero_grad()
 
         if args.accum_freq == 1:
+            no_grad_sync = model.no_sync if args.distributed else contextlib.nullcontext
+            losses_dict = {}
+
+            # FLAVA unimodal forward passes
+            if is_flava and args.flava_unimodal_mlm:
+                with no_grad_sync():
+                    with autocast():
+                        mlm_out = model(**mlm_batch, unimodal_mlm=True)
+                        mlm_losses = loss.forward_mlm(**mlm_out)
+                        total_mlm_loss = sum(mlm_losses.values())
+                        losses_dict["unimodal_mlm_loss"] = total_mlm_loss
+                    backward(total_mlm_loss, scaler)
+
+            if is_flava and args.flava_unimodal_mae:
+                with no_grad_sync():
+                    with autocast():
+                        mae_out = model(**mae_batch, unimodal_mae=True)
+                        mae_losses = loss.forward_mae(**mae_out)
+                        total_mae_loss = sum(mae_losses.values())
+                        losses_dict["unimodal_mae_loss"] = total_mae_loss
+                    backward(total_mae_loss, scaler)
+
+            # FLAVA multimodal forward pass
             with autocast():
                 model_out = model(**batch)
                 assert isinstance(model_out, dict)
@@ -144,23 +168,9 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args
                 else:
                     total_loss = losses
                     losses = {"loss": losses}
+                losses_dict.update(losses)
 
             backward(total_loss, scaler)
-
-            # FLAVA unimodal forward passes
-            if is_flava and args.flava_unimodal_mlm:
-                mlm_out = model(**mlm_batch, unimodal_mlm=True)
-                mlm_losses = loss.forward_mlm(**mlm_out)
-                total_mlm_loss = sum(mlm_losses.values())
-                losses["unimodal_mlm_loss"] = total_mlm_loss
-                backward(total_mlm_loss, scaler)
-
-            if is_flava and args.flava_unimodal_mae:
-                mae_out = model(**mae_batch, unimodal_mae=True)
-                mae_losses = loss.forward_mae(**mae_out)
-                total_mae_loss = sum(mae_losses.values())
-                losses["unimodal_mae_loss"] = total_mae_loss
-                backward(total_mae_loss, scaler)
 
         else:
             # First, cache the features without any gradient tracking.
@@ -241,7 +251,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args
             percent_complete = 100.0 * batch_count / num_batches_per_epoch
 
             # NOTE loss is coarsely sampled, just master node and per log update
-            for key, val in losses.items():
+            for key, val in losses_dict.items():
                 if key not in losses_m:
                     losses_m[key] = AverageMeter()
                 losses_m[key].update(val.item(), batch_size)
