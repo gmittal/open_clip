@@ -134,10 +134,7 @@ class MLMLoss(nn.Module):
         labels = labels.reshape(-1)
 
         # only compute loss on masked logits
-        try:
-            masked_idx = torch.where(labels != self.ignore_index)
-        except RuntimeError:
-            import pdb; pdb.set_trace()
+        masked_idx = torch.where(labels != self.ignore_index)
         masked_logits = logits[masked_idx]
         masked_labels = labels[masked_idx]
 
