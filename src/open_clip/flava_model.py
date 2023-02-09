@@ -120,6 +120,24 @@ class MultimodalTransformer(nn.Module):
         self.ln_post = norm_layer(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
+        self.init_parameters()
+
+    def init_parameters(self):
+        nn.init.normal_(self.class_embedding, std=0.02)
+        nn.init.normal_(self.positional_embedding, std=0.01)
+
+        proj_std = (self.transformer.width ** -0.5) * ((2 * self.transformer.layers) ** -0.5)
+        attn_std = self.transformer.width ** -0.5
+        fc_std = (2 * self.transformer.width) ** -0.5
+        for block in self.transformer.resblocks:
+            nn.init.normal_(block.attn.in_proj_weight, std=attn_std)
+            nn.init.normal_(block.attn.out_proj.weight, std=proj_std)
+            nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
+            nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
+
+        if self.text_projection is not None:
+            nn.init.normal_(self.text_projection, std=self.transformer.width ** -0.5)
+
     def lock(self, unlocked_groups=0, freeze_bn_stats=False):
         assert unlocked_groups == 0, 'partial locking not currently supported for this model'
         for param in self.parameters():
@@ -344,6 +362,12 @@ class FLAVA(nn.Module):
 
         # Contrastive logit scale
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+
+        self.init_parameters()
+
+    def init_parameters(self):
+        nn.init.normal_(self.patch_mask_token, std=0.02)
+        nn.init.normal_(self.mm_patch_mask_token, std=0.02)
 
     @torch.jit.ignore
     def set_grad_checkpointing(self, enable=True):
