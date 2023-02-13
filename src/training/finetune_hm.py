@@ -162,7 +162,12 @@ class FLAVAMultimodalClassifier(nn.Module):
         super().__init__()
 
         self.encoder = encoder
-        self.logits_proj = nn.Linear(embed_dim, num_labels)
+        self.logits_proj = nn.Sequential(
+            nn.Linear(embed_dim, 1536),
+            nn.GELU(),
+            nn.LayerNorm(1536),
+            nn.Linear(1536, num_labels),
+        )
 
     def forward(self, image, text):
         multimodal_features = self.encoder.encode_multimodal(image, text)
@@ -175,7 +180,12 @@ class CLIPMultimodalClassifier(nn.Module):
         super().__init__()
 
         self.encoder = encoder
-        self.logits_proj = nn.Linear(embed_dim * 2, num_labels)
+        self.logits_proj = nn.Sequential(
+            nn.Linear(embed_dim * 2, 1536),
+            nn.GELU(),
+            nn.LayerNorm(1536),
+            nn.Linear(1536, num_labels),
+        )
 
     def forward(self, image, text):
         # CLIP doesn't have a multimodal encoder, so we concatenate the features
