@@ -29,6 +29,13 @@ def encode_batch(model, dataloader):
             embeddings.append(model.encode_image(batch))
     return torch.cat(embeddings, dim=0)
 
+def preprocess_batch(dict, preprocessor, batch_size=64):
+    prep = []
+    for i in range(0, len(dict), batch_size):
+        prep.append(preprocessor(dict[i:i+batch_size]['img_resized']).unsqueeze(0))
+    
+    return torch.cat(prep, dim=0)
+
 def generate_embeddings(args):
     cifar = load_dataset("cifar10")
     if args.input_dir is None:
@@ -39,8 +46,8 @@ def generate_embeddings(args):
         cifar_test_resized.set_format(type='torch', columns=['img_resized'])
 
         model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32-quickgelu', pretrained=args.laion_model)
-        prep_train = preprocess(cifar_train_resized['img_resized']).unsqueeze(0)
-        prep_test = preprocess(cifar_test_resized['img_resized']).unsqueeze(0)
+        prep_train = preprocess_batch(cifar_train_resized, preprocess)
+        prep_test = preprocess_batch(cifar_test_resized, preprocess)
 
         # batch prep_train and prep_test and then run encode_image
         train_dataloader = DataLoader(prep_train, batch_size=64, shuffle=False)
