@@ -3,6 +3,7 @@ import os
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
 from datasets import load_dataset
 from joblib import Parallel, delayed
 from PIL import Image
@@ -20,6 +21,14 @@ def resize(imgs, size=(24, 24)):
         imgs['img_resized'] = [img.resize(size) for img in imgs['img']]
         return imgs
 
+def encode_batch(model, dataloader):
+    model.eval()
+    embeddings = []
+    with torch.no_grad():
+        for batch in dataloader:
+            embeddings.append(model.encode_image(batch))
+    return torch.cat(embeddings, dim=0)
+
 def generate_embeddings(args):
     cifar = load_dataset("cifar10")
     if args.input_dir is None:
@@ -33,8 +42,12 @@ def generate_embeddings(args):
         prep_train = preprocess(cifar_train_resized['img_resized']).unsqueeze(0)
         prep_test = preprocess(cifar_test_resized['img_resized']).unsqueeze(0)
 
-        train_embeddings = model.encode_image(prep_train)
-        test_embeddings = model.encode_image(prep_test)
+        # batch prep_train and prep_test and then run encode_image
+        train_dataloader = DataLoader(prep_train, batch_size=64, shuffle=False)
+        test_dataloader = DataLoader(prep_test, batch_size=64, shuffle=False)
+
+        train_embeddings = encode_batch(model, train_dataloader)
+        test_embeddings = encode_batch(model, test_dataloader)
 
         torch.save(train_embeddings, os.path.join(args.output_dir, "cifar_train_embeddings.pt"))
         torch.save(test_embeddings, os.path.join(args.output_dir, "cifar_test_embeddings.pt"))
