@@ -412,6 +412,12 @@ def parse_args(args):
         default=14,
         help="Batch size per GPU for unimodal MLM."
     )
+    parser.add_argument(
+        "--wds-filter-smaller-256",
+        default=False,
+        action='store_true',
+        help="Use dataset sampling from BLIP: filter out images with a shorter edge smaller than 256 pixels."
+    )
 
     args = parser.parse_args(args)
 

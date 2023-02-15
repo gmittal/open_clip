@@ -194,6 +194,13 @@ def filter_no_caption_or_no_image(sample):
     return has_caption and has_image
 
 
+def filter_blip_subset(sample):
+    # Only download images whose shorter edge is larger than 256 pixels (from BLIP)
+    metadata = json.loads(sample["json"])
+    larger_than_256 = min(metadata["original_height"], metadata["original_width"]) >= 256
+    return filter_no_caption_or_no_image(sample) and larger_than_256
+
+
 def log_and_continue(exn):
     """Call in an exception handler to ignore any exception, issue a warning, and continue."""
     logging.warning(f'Handling webdataset error ({repr(exn)}). Ignoring.')
@@ -393,8 +400,9 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
             wds.tarfile_to_samples(handler=log_and_continue),
         ])
     pipeline.extend([
-        wds.select(filter_no_caption_or_no_image),
+        wds.select(filter_blip_subset if args.wds_filter_smaller_256 else filter_no_caption_or_no_image),
         wds.decode("pilrgb", handler=log_and_continue),
+        # *([wds.select(filter_blip_subset)] if args.wds_filter_smaller_256 else []),
         wds.rename(image="jpg;png;jpeg;webp", text="txt"),
         wds.map_dict(image=preprocess_img, text=lambda text: tokenizer(text)[0]),
         *([wds.to_tuple("image", "text")] if collate_fn is None else []),
