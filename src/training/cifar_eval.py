@@ -12,9 +12,13 @@ from vision_eval import mapper
 import open_clip
 
 
-def resize(imgs, size=(224, 224)):
-    imgs['img_resized'] = imgs['img'].resize(size)
-    return imgs
+def resize(imgs, size=(24, 24)):
+    if type(imgs['img']) == Image.Image:
+        imgs['img_resized'] = imgs['img'].resize(size)
+        return imgs
+    elif type(imgs['img']) == list:
+        imgs['img_resized'] = [img.resize(size) for img in imgs['img']]
+        return imgs
 
 def generate_embeddings(args):
     cifar = load_dataset("cifar10")
@@ -26,8 +30,8 @@ def generate_embeddings(args):
         cifar_test_resized.set_format(type='torch', columns=['img_resized'])
 
         model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32-quickgelu', pretrained=args.laion_model)
-        prep_train = preprocess(cifar_train_resized['img_resized'])
-        prep_test = preprocess(cifar_test_resized['img_resized'])
+        prep_train = preprocess(cifar_train_resized['img_resized']).unsqueeze(0)
+        prep_test = preprocess(cifar_test_resized['img_resized']).unsqueeze(0)
 
         train_embeddings = model.encode_image(prep_train)
         test_embeddings = model.encode_image(prep_test)
@@ -59,7 +63,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input_dir", type=str, required=False, description="Input directory for cached embeddings")
+    parser.add_argument("--input_dir", type=str, required=False, help="Input directory for cached embeddings")
     parser.add_argument("--output_dir", type=str, required=False)
     parser.add_argument("--laion_model", type=str, required=False, default="laion400m_e32")
     args = parser.parse_args()
