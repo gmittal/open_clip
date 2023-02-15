@@ -196,6 +196,8 @@ def filter_no_caption_or_no_image(sample):
 
 def filter_blip_subset(sample):
     # Only download images whose shorter edge is larger than 256 pixels (from BLIP)
+    if "json" not in sample:
+        return False
     metadata = json.loads(sample["json"])
     larger_than_256 = min(metadata["original_height"], metadata["original_width"]) >= 256
     return filter_no_caption_or_no_image(sample) and larger_than_256
@@ -402,7 +404,6 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
     pipeline.extend([
         wds.select(filter_blip_subset if args.wds_filter_smaller_256 else filter_no_caption_or_no_image),
         wds.decode("pilrgb", handler=log_and_continue),
-        # *([wds.select(filter_blip_subset)] if args.wds_filter_smaller_256 else []),
         wds.rename(image="jpg;png;jpeg;webp", text="txt"),
         wds.map_dict(image=preprocess_img, text=lambda text: tokenizer(text)[0]),
         *([wds.to_tuple("image", "text")] if collate_fn is None else []),
