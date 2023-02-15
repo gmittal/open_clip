@@ -180,8 +180,8 @@ class FLAVAVisionCfg:
 
     # MAE parameters
     mae_mask_ratio: float = 0.75
-    mae_decoder_layers: int = 2,
-    mae_decoder_width: int = 512,
+    mae_decoder_layers: int = 2
+    mae_decoder_width: int = 512
     mae_decoder_heads: int = 4
 
 
