@@ -307,9 +307,9 @@ class FLAVA(nn.Module):
 
         # unimodal MLM
         self.mlm_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 4),
-            nn.ReLU(),
-            nn.Linear(embed_dim * 4, self.text.config.vocab_size),
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.GELU(),
+            nn.Linear(embed_dim * 2, self.text.config.vocab_size),
         )
 
         # unimodal MAE
@@ -332,24 +332,24 @@ class FLAVA(nn.Module):
 
         # Cross-modal MLM
         self.mm_mlm_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 4),
+            nn.Linear(embed_dim, embed_dim * 2),
             nn.GELU(),
-            nn.Linear(embed_dim * 4, self.text.config.vocab_size),
+            nn.Linear(embed_dim * 2, self.text.config.vocab_size),
         )
 
         # Cross-modal MAE
         self.mm_patch_mask_token = nn.Parameter(multimodal_cfg.width ** -0.5 * torch.randn(multimodal_cfg.width))
         self.mm_mae_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 4),
+            nn.Linear(embed_dim, embed_dim * 2),
             nn.GELU(),
-            nn.Linear(embed_dim * 4, vision_cfg.patch_size ** 2 * 3, bias=True),  # patch reconstruction
+            nn.Linear(embed_dim * 2, vision_cfg.patch_size ** 2 * 3, bias=True),  # patch reconstruction
         )
 
         # ITM
         self.itm_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 4),
+            nn.Linear(embed_dim, embed_dim * 2),
             nn.GELU(),
-            nn.Linear(embed_dim * 4, 1),
+            nn.Linear(embed_dim * 2, 1),
         )
 
         # Output projections

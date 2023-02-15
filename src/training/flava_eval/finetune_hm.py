@@ -163,10 +163,10 @@ class FLAVAMultimodalClassifier(nn.Module):
 
         self.encoder = encoder
         self.logits_proj = nn.Sequential(
-            nn.Linear(embed_dim, 1536),
+            nn.Linear(embed_dim, embed_dim * 2),
             nn.GELU(),
-            nn.LayerNorm(1536),
-            nn.Linear(1536, num_labels),
+            nn.LayerNorm(embed_dim * 2),
+            nn.Linear(embed_dim * 2, num_labels),
         )
 
     def forward(self, image, text):
@@ -181,10 +181,10 @@ class CLIPMultimodalClassifier(nn.Module):
 
         self.encoder = encoder
         self.logits_proj = nn.Sequential(
-            nn.Linear(embed_dim * 2, 1536),
+            nn.Linear(embed_dim * 2, embed_dim * 2),
             nn.GELU(),
-            nn.LayerNorm(1536),
-            nn.Linear(1536, num_labels),
+            nn.LayerNorm(embed_dim * 2),
+            nn.Linear(embed_dim * 2, num_labels),
         )
 
     def forward(self, image, text):
