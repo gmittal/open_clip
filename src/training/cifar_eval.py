@@ -1,18 +1,16 @@
 import argparse
 import os
 
-import torch
-
-from PIL import Image
 import numpy as np
+import torch
+from datasets import load_dataset
+from joblib import Parallel, delayed
+from PIL import Image
 from sklearn.linear_model import LogisticRegression
+from vision_eval import mapper
+
 import open_clip
 
-from joblib import Parallel, delayed
-
-from datasets import load_dataset
-
-from vision_eval import mapper
 
 def resize(imgs, size=(224, 224)):
     imgs['img_resized'] = imgs['img'].resize(size)
