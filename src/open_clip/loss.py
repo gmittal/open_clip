@@ -186,10 +186,8 @@ class MAELoss(nn.Module):
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
 
-        loss = (pred - target) ** 2
-        loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
-
-        loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
+        loss = (pred[mask == 1] - target[mask == 1]) ** 2
+        loss = loss.mean()  # mean loss on removed patches
         return loss
 
 
