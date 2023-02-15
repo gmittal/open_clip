@@ -20,10 +20,36 @@ from torch.utils.data.distributed import DistributedSampler
 from webdataset.filters import _shuffle
 from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
 
+from open_clip.flava_data import flava_imagenet_collate, get_mlm_collate
+
 try:
     import horovod.torch as hvd
 except ImportError:
     hvd = None
+
+
+class HFTextDataset(Dataset):
+    def __init__(self, name, split, text_key, tokenizer=None):
+        try:
+            from datasets import load_dataset
+        except ImportError:
+            raise ImportError('Please install datasets with `pip install datasets`.')
+
+        logging.debug(f'Loading HuggingFace dataset from {name}.')
+        self.df = load_dataset(name, split=split)
+        self.text_key = text_key
+        logging.debug('Done loading data.')
+
+        self.tokenize = tokenizer
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        text = self.tokenize([str(self.df[idx][self.text_key])])[0]
+        return {
+            'text': text,
+         }
 
 
 class CsvDataset(Dataset):
@@ -42,9 +68,12 @@ class CsvDataset(Dataset):
         return len(self.captions)
 
     def __getitem__(self, idx):
-        images = self.transforms(Image.open(str(self.images[idx])))
-        texts = self.tokenize([str(self.captions[idx])])[0]
-        return images, texts
+        image = self.transforms(Image.open(str(self.images[idx])))
+        text = self.tokenize([str(self.captions[idx])])[0]
+        return {
+            'image': image,
+            'text': text,
+         }
 
 
 class SharedEpoch:
@@ -93,7 +122,7 @@ def get_dataset_size(shards):
     return total_size, num_shards
 
 
-def get_imagenet(args, preprocess_fns, split):
+def get_imagenet(args, preprocess_fns, split, collate_fn=None):
     assert split in ["train", "val", "v2"]
     is_train = split == "train"
     preprocess_train, preprocess_val = preprocess_fns
@@ -134,6 +163,7 @@ def get_imagenet(args, preprocess_fns, split):
         batch_size=args.batch_size,
         num_workers=args.workers,
         sampler=sampler,
+        collate_fn=collate_fn,
     )
 
     return DataInfo(dataloader=dataloader, sampler=sampler)
@@ -209,6 +239,14 @@ def pytorch_worker_seed(increment=0):
         return seed
     # fallback to wds rank based seed
     return wds.utils.pytorch_worker_seed()
+
+
+def wds_default_collate(batch):
+    image, text = zip(*batch)
+    return {
+        'image': torch.stack(image),
+        'text': torch.stack(text),
+    }
 
 
 _SHARD_SHUFFLE_SIZE = 2000
@@ -295,7 +333,7 @@ class ResampledShards2(IterableDataset):
             yield dict(url=self.rng.choice(self.urls))
 
 
-def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokenizer=None):
+def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokenizer=None, collate_fn=None):
     input_shards = args.train_data if is_train else args.val_data
     assert input_shards is not None
     resampled = getattr(args, 'dataset_resampled', False) and is_train
@@ -312,7 +350,7 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
             num_samples = args.val_num_samples or 0  # eval will just exhaust the iterator if not specified
 
     shared_epoch = SharedEpoch(epoch=epoch)  # create a shared epoch store to sync epoch to dataloader worker proc
-    
+
     if resampled:
         pipeline = [ResampledShards2(input_shards, deterministic=True, epoch=shared_epoch)]
     else:
@@ -350,8 +388,12 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
         wds.decode("pilrgb", handler=log_and_continue),
         wds.rename(image="jpg;png;jpeg;webp", text="txt"),
         wds.map_dict(image=preprocess_img, text=lambda text: tokenizer(text)[0]),
-        wds.to_tuple("image", "text"),
-        wds.batched(args.batch_size, partial=not is_train),
+        *([wds.to_tuple("image", "text")] if collate_fn is None else []),
+        wds.batched(
+            args.batch_size,
+            partial=not is_train,
+            collation_fn=wds_default_collate if collate_fn is None else collate_fn,
+        ),
     ])
 
     dataset = wds.DataPipeline(*pipeline)
@@ -400,9 +442,10 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
     return DataInfo(dataloader=dataloader, shared_epoch=shared_epoch)
 
 
-def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None):
+def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None, collate_fn=None):
     input_filename = args.train_data if is_train else args.val_data
     assert input_filename
+
     dataset = CsvDataset(
         input_filename,
         preprocess_fn,
@@ -422,7 +465,38 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None):
         num_workers=args.workers,
         pin_memory=True,
         sampler=sampler,
+        collate_fn=collate_fn,
         drop_last=is_train,
+    )
+    dataloader.num_samples = num_samples
+    dataloader.num_batches = len(dataloader)
+
+    return DataInfo(dataloader, sampler)
+
+
+def get_hf_text_dataset(args, epoch=0, tokenizer=None, collate_fn=None):
+    dataset_name = args.flava_unimodal_mlm
+    assert dataset_name
+
+    dataset = HFTextDataset(
+        dataset_name,
+        split='train',
+        text_key='text',
+        tokenizer=tokenizer
+    )
+    num_samples = len(dataset)
+    sampler = DistributedSampler(dataset) if args.distributed else None
+    shuffle = sampler is None
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=shuffle,
+        num_workers=args.workers,
+        pin_memory=True,
+        sampler=sampler,
+        collate_fn=collate_fn,
+        drop_last=True,
     )
     dataloader.num_samples = num_samples
     dataloader.num_batches = len(dataloader)
@@ -447,10 +521,11 @@ class SyntheticDataset(Dataset):
     def __getitem__(self, idx):
         if self.transform is not None:
             image = self.transform(self.image)
+        # TODO(gmittal): make this usable like other datasets
         return image, self.preprocess_txt(self.caption)
 
 
-def get_synthetic_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None):
+def get_synthetic_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None, collate_fn=None):
     image_size = preprocess_fn.transforms[0].size
     dataset = SyntheticDataset(
         transform=preprocess_fn, image_size=image_size, dataset_size=args.train_num_samples, tokenizer=tokenizer)
@@ -465,6 +540,7 @@ def get_synthetic_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None
         num_workers=args.workers,
         pin_memory=True,
         sampler=sampler,
+        collate_fn=collate_fn,
         drop_last=is_train,
     )
     dataloader.num_samples = num_samples
@@ -491,24 +567,43 @@ def get_dataset_fn(data_path, dataset_type):
                 f"Tried to figure out dataset type, but failed for extension {ext}.")
     else:
         raise ValueError(f"Unsupported dataset type: {dataset_type}")
-    
 
-def get_data(args, preprocess_fns, epoch=0, tokenizer=None):
+
+def get_data(args, preprocess_fns, epoch=0, tokenizer=None, collate_fn=None):
     preprocess_train, preprocess_val = preprocess_fns
     data = {}
 
     if args.train_data or args.dataset_type == "synthetic":
         data["train"] = get_dataset_fn(args.train_data, args.dataset_type)(
-            args, preprocess_train, is_train=True, epoch=epoch, tokenizer=tokenizer)
+            args, preprocess_train, is_train=True, epoch=epoch, tokenizer=tokenizer, collate_fn=collate_fn)
 
     if args.val_data:
         data["val"] = get_dataset_fn(args.val_data, args.dataset_type)(
-            args, preprocess_val, is_train=False, tokenizer=tokenizer)
+            args, preprocess_val, is_train=False, tokenizer=tokenizer, collate_fn=collate_fn)
 
     if args.imagenet_val is not None:
         data["imagenet-val"] = get_imagenet(args, preprocess_fns, "val")
 
     if args.imagenet_v2 is not None:
         data["imagenet-v2"] = get_imagenet(args, preprocess_fns, "v2")
+
+    # FLAVA unimodal data sources
+    is_flava = args.model.startswith('flava')
+    if is_flava and args.flava_unimodal_mlm:
+        data["flava-mlm"] = get_hf_text_dataset(
+            args,
+            epoch=epoch,
+            tokenizer=tokenizer,
+            collate_fn=get_mlm_collate(tokenizer, args.flava_mlm_prob),
+        )
+
+    if is_flava and args.flava_unimodal_mae:
+        # TODO: make this configurable to arbitrary ImageNet path
+        data["flava-mae"] = get_imagenet(
+            args,
+            preprocess_fns,
+            "val",
+            collate_fn=flava_imagenet_collate,
+        )
 
     return data

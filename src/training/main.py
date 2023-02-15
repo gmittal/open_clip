@@ -26,7 +26,8 @@ try:
 except ImportError:
     hvd = None
 
-from open_clip import create_model_and_transforms, trace_model, get_tokenizer
+from open_clip import create_model_and_transforms, trace_model, get_tokenizer, create_loss
+from open_clip.flava_data import get_flava_collate
 from training.data import get_data
 from training.distributed import is_master, init_distributed_device, broadcast_object
 from training.logger import setup_logging
@@ -173,6 +174,7 @@ def main(args):
         force_custom_text=args.force_custom_text,
         force_patch_dropout=args.force_patch_dropout,
         pretrained_image=args.pretrained_image,
+        pretrained_hf=args.pretrained_hf,
         image_mean=args.image_mean,
         image_std=args.image_std,
     )
@@ -212,6 +214,8 @@ def main(args):
         if args.ddp_static_graph:
             # this doesn't exist in older PyTorch, arg only added if enabled
             ddp_args['static_graph'] = True
+        if args.ddp_find_unused_parameters:
+            ddp_args['find_unused_parameters'] = True
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
 
     # create optimizer and scaler
@@ -266,7 +270,11 @@ def main(args):
             logging.info(f"=> loaded checkpoint '{args.resume}' (epoch {start_epoch})")
 
     # initialize datasets
-    data = get_data(args, (preprocess_train, preprocess_val), epoch=start_epoch, tokenizer=get_tokenizer(args.model))
+    tokenizer = get_tokenizer(args.model)
+    collate_fn = None
+    if args.model.startswith('flava'):
+        collate_fn = get_flava_collate(tokenizer, mlm_prob=args.flava_mlm_prob, itm_prob=args.flava_itm_prob)
+    data = get_data(args, (preprocess_train, preprocess_val), epoch=start_epoch, tokenizer=tokenizer, collate_fn=collate_fn)
     assert len(data), 'At least one train or eval dataset must be specified.'
 
     # create scheduler if train
@@ -292,6 +300,7 @@ def main(args):
         wandb.init(
             project=args.wandb_project_name,
             name=args.name,
+            id=args.name,
             notes=args.wandb_notes,
             tags=[],
             resume='auto',
@@ -306,11 +315,13 @@ def main(args):
         evaluate(model, data, start_epoch, args, writer)
         return
 
+    loss = create_loss(args)
+
     for epoch in range(start_epoch, args.epochs):
         if is_master(args):
             logging.info(f'Start epoch {epoch}')
 
-        train_one_epoch(model, data, epoch, optimizer, scaler, scheduler, args, writer)
+        train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args, tb_writer=writer)
         completed_epoch = epoch + 1
 
         if any(v in data for v in ('val', 'imagenet-val', 'imagenet-v2')):
