@@ -163,7 +163,8 @@ class MAELoss(nn.Module):
         imgs: (N, 3, H, W)
         x: (N, L, patch_size**2 *3)
         """
-        assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
+        assert imgs.shape[2] == imgs.shape[3], 'image must be square'
+        assert imgs.shape[2] % p == 0, 'image size must be divisible by patch size'
 
         h = w = imgs.shape[2] // p
         x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
