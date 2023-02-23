@@ -132,6 +132,52 @@ def get_task_dataloaders(transforms, args):
     return dataloaders
 
 
+def zero_shot_classifier(model, device, args):
+    tokenizer = get_tokenizer(args.model)
+    prompts = [
+        'a meme.',
+        'a hatespeech meme.'
+    ]
+    texts = tokenizer(prompts).to(device)
+    class_embeddings = model.encode_text(texts, normalize=True)
+
+    def image_clf(x):
+        image_features = model.encode_image(x, normalize=True)
+        logits = 100. * image_features @ class_embeddings.T
+        return logits
+
+    return image_clf
+
+
+def run(model, classifier, dataloader, device, args):
+    model.eval()
+    metric = evaluate.load("roc_auc")
+    accuracy, n = 0., 0.
+
+    with torch.no_grad():
+        for batch in tqdm(dataloader, unit_scale=args.batch_size):
+            images = batch['image'].to(device)
+            target = batch['label'].to(device)
+            logits = classifier(images)
+
+            # update ROC AUC
+            pred_hateful = torch.softmax(logits, dim=-1)[:, 1]
+            metric.add_batch(
+                prediction_scores=pred_hateful.cpu().numpy(),
+                references=target.cpu().numpy(),
+            )
+
+            # update accuracy
+            pred_cmp_label = logits[:, 0] < logits[:, 1]
+            accuracy += (pred_cmp_label == target).sum()
+            n += images.size(0)
+
+    metrics = metric.compute()
+    roc_auc = metrics["roc_auc"]
+    accuracy /= n
+    return roc_auc, accuracy.item()
+
+
 def compute_metrics(model, dataloader, device, args):
     model.eval()
     metric = evaluate.load("roc_auc")
@@ -174,8 +220,10 @@ def main(args):
     embed_dim = model_cfg["embed_dim"]
 
     data = get_task_dataloaders(preprocess_val, args)
+    classifier = zero_shot_classifier(model, device, args)
+    roc_auc, accuracy = run(model, classifier, data["test"], device, args)
 
-    import pdb; pdb.set_trace()
+    print(f'ROC AUC: {roc_auc:.6f}\nAccuracy: {accuracy:.6f}')
 
 
 if __name__ == "__main__":
