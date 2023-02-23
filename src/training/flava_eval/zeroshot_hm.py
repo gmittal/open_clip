@@ -125,7 +125,7 @@ def get_task_dataloaders(transforms, args):
             shuffle=True,
             num_workers=args.workers,
             pin_memory=True,
-            drop_last=True,
+            drop_last=True if split_name == "train" else False,
         )
         dataloaders[split_name] = dataloader
 
