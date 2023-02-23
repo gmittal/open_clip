@@ -401,6 +401,22 @@ class FLAVA(nn.Module):
         mm_encoding = self.mm_projection(cls_m)
         return F.normalize(mm_encoding, dim=-1) if normalize else mm_encoding
 
+    def forward_itm(self, image, text):
+        h_image, _, _ = self.visual(image, mask_ratio=0)
+        h_text = self.text(text)
+        mm_h_image = self.image_to_mm_projection(h_image)
+        mm_h_text = self.text_to_mm_projection(h_text)
+
+        # Multimodal attention mask (ignore text padding tokens)
+        mm_text_attn_mask = (text != self.text.config.pad_token_id).long()
+        mm_vis_attn_mask = torch.ones(*h_image.shape[:2], dtype=torch.long, device=mm_text_attn_mask.device)
+        mm_attn_mask = torch.cat([mm_vis_attn_mask, mm_text_attn_mask], dim=1)
+
+        mm_input = torch.cat([mm_h_image, mm_h_text], dim=1)
+        h_m = self.multimodal(mm_input, attn_mask=mm_attn_mask)
+        cls_m = h_m[:, 0, :]
+        return self.itm_head(self.mm_projection(cls_m))
+
     def forward_mlm(self, *, text_masked, mlm_labels):
         h_masked_text = self.text(text_masked)
         mlm_logits = self.mlm_head(self.text_projection(h_masked_text[:, 1:, :]))

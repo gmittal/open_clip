@@ -178,33 +178,6 @@ def run(model, classifier, dataloader, device, args):
     return roc_auc, accuracy.item()
 
 
-def compute_metrics(model, dataloader, device, args):
-    model.eval()
-    metric = evaluate.load("roc_auc")
-    val_loss = 0
-    samples_seen = 0
-    for batch in dataloader:
-        with torch.no_grad():
-            image = batch["image"].to(device)
-            text = batch["text"].to(device)
-            label = batch["label"].to(device)
-            samples_seen += text.shape[0]
-            logits = model(image, text)
-            logits = logits.view(-1)
-            label = label.view(-1).float()
-            pred_scores = torch.sigmoid(logits)
-            batch_val_loss = nn.functional.binary_cross_entropy_with_logits(logits, label, reduction='sum')
-        val_loss += batch_val_loss.item()
-        metric.add_batch(
-            prediction_scores=pred_scores.cpu().numpy(),
-            references=label.cpu().numpy(),
-        )
-    model.train()
-    metrics = metric.compute()
-    metrics["loss"] = val_loss / samples_seen
-    return metrics
-
-
 def main(args):
     args = parse_args(args)
     random_seed(args.seed, 0)
@@ -216,13 +189,10 @@ def main(args):
         device=device,
         pretrained_hf=False,
     )
-    model_cfg = open_clip.factory.get_model_config(args.model)
-    embed_dim = model_cfg["embed_dim"]
-
     data = get_task_dataloaders(preprocess_val, args)
+
     classifier = zero_shot_classifier(model, device, args)
     roc_auc, accuracy = run(model, classifier, data["test"], device, args)
-
     print(f'ROC AUC: {roc_auc:.6f}\nAccuracy: {accuracy:.6f}')
 
 
