@@ -34,7 +34,7 @@ def parse_args(args):
         "--batch-size", type=int, default=32, help="Batch size per GPU."
     )
     parser.add_argument(
-        "--epochs", type=int, default=10, help="Number of epochs to train for."
+        "--epochs", type=int, default=1000, help="Number of epochs to train for."
     )
     parser.add_argument("--lr", type=float, default=3e-5, help="Learning rate.")
     parser.add_argument("--beta1", type=float, default=0.9, help="Adam beta 1.")

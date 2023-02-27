@@ -163,7 +163,8 @@ class MAELoss(nn.Module):
         imgs: (N, 3, H, W)
         x: (N, L, patch_size**2 *3)
         """
-        assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
+        assert imgs.shape[2] == imgs.shape[3], 'image must be square'
+        assert imgs.shape[2] % p == 0, 'image size must be divisible by patch size'
 
         h = w = imgs.shape[2] // p
         x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
@@ -177,17 +178,16 @@ class MAELoss(nn.Module):
         pred: [N, L, p*p*3]
         mask: [N, L], 0 is keep, 1 is remove,
         """
-        patch_size = int((pred.shape[-1] / 3)**0.5)  # TODO: this feels hacky
+        patch_area = pred.shape[-1] / 3
+        patch_size = int(patch_area**0.5)
         target = self.patchify(imgs, patch_size)
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
 
-        loss = (pred - target) ** 2
-        loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
-
-        loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
+        loss = (pred[mask == 1] - target[mask == 1]) ** 2
+        loss = loss.mean()  # mean loss on removed patches
         return loss
 
 

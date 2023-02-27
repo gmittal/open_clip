@@ -400,6 +400,24 @@ def parse_args(args):
         default=False,
         help="Dataset used for unimodal image encoder pre-training with MAE."
     )
+    parser.add_argument(
+        "--flava-unimodal-mae-batch-size",
+        type=int,
+        default=14,
+        help="Batch size per GPU for unimodal MAE."
+    )
+    parser.add_argument(
+        "--flava-unimodal-mlm-batch-size",
+        type=int,
+        default=14,
+        help="Batch size per GPU for unimodal MLM."
+    )
+    parser.add_argument(
+        "--wds-filter-smaller-256",
+        default=False,
+        action='store_true',
+        help="Use dataset sampling from BLIP: filter out images with a shorter edge smaller than 256 pixels."
+    )
 
     args = parser.parse_args(args)
 

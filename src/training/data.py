@@ -122,7 +122,7 @@ def get_dataset_size(shards):
     return total_size, num_shards
 
 
-def get_imagenet(args, preprocess_fns, split, collate_fn=None):
+def get_imagenet(args, preprocess_fns, split, flava_unimodal=False, collate_fn=None):
     assert split in ["train", "val", "v2"]
     is_train = split == "train"
     preprocess_train, preprocess_val = preprocess_fns
@@ -139,6 +139,7 @@ def get_imagenet(args, preprocess_fns, split, collate_fn=None):
             preprocess_fn = preprocess_val
         assert data_path
 
+        preprocess_fn = preprocess_train if flava_unimodal and split == "val" else preprocess_fn
         dataset = datasets.ImageFolder(data_path, transform=preprocess_fn)
 
     if is_train:
@@ -158,12 +159,19 @@ def get_imagenet(args, preprocess_fns, split, collate_fn=None):
     else:
         sampler = None
 
+    sampler = DistributedSampler(dataset) if args.distributed and flava_unimodal else None
+    shuffle = flava_unimodal and sampler is None
+    batch_size = args.flava_unimodal_mae_batch_size if flava_unimodal else args.batch_size
+
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
+        shuffle=shuffle,
         num_workers=args.workers,
+        pin_memory=flava_unimodal,
         sampler=sampler,
         collate_fn=collate_fn,
+        drop_last=flava_unimodal,
     )
 
     return DataInfo(dataloader=dataloader, sampler=sampler)
@@ -183,6 +191,16 @@ def filter_no_caption_or_no_image(sample):
     has_caption = ('txt' in sample)
     has_image = ('png' in sample or 'jpg' in sample or 'jpeg' in sample or 'webp' in sample)
     return has_caption and has_image
+
+
+def filter_blip_subset(sample):
+    # Only download images whose shorter edge is larger than 256 pixels (from BLIP)
+    has_json_metadata = ('json' in sample)
+    if not (filter_no_caption_or_no_image(sample) and has_json_metadata):
+        return False
+    metadata = json.loads(sample['json'])
+    has_dimensions = ('original_height' in metadata) and ('original_width' in metadata)
+    return has_dimensions and min(metadata['original_height'], metadata["original_width"]) >= 256
 
 
 def log_and_continue(exn):
@@ -384,7 +402,7 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
             wds.tarfile_to_samples(handler=log_and_continue),
         ])
     pipeline.extend([
-        wds.select(filter_no_caption_or_no_image),
+        wds.select(filter_blip_subset if args.wds_filter_smaller_256 else filter_no_caption_or_no_image),
         wds.decode("pilrgb", handler=log_and_continue),
         wds.rename(image="jpg;png;jpeg;webp", text="txt"),
         wds.map_dict(image=preprocess_img, text=lambda text: tokenizer(text)[0]),
@@ -490,7 +508,7 @@ def get_hf_text_dataset(args, epoch=0, tokenizer=None, collate_fn=None):
 
     dataloader = DataLoader(
         dataset,
-        batch_size=args.batch_size,
+        batch_size=args.flava_unimodal_mlm_batch_size,
         shuffle=shuffle,
         num_workers=args.workers,
         pin_memory=True,
@@ -521,7 +539,6 @@ class SyntheticDataset(Dataset):
     def __getitem__(self, idx):
         if self.transform is not None:
             image = self.transform(self.image)
-        # TODO(gmittal): make this usable like other datasets
         return image, self.preprocess_txt(self.caption)
 
 
@@ -603,6 +620,7 @@ def get_data(args, preprocess_fns, epoch=0, tokenizer=None, collate_fn=None):
             args,
             preprocess_fns,
             "val",
+            flava_unimodal=True,
             collate_fn=flava_imagenet_collate,
         )
 

@@ -62,6 +62,12 @@ def get_latest_checkpoint(path: str):
 def main(args):
     args = parse_args(args)
 
+    # HACK
+    if args.train_data is not None and args.train_data.startswith('s3'):
+        args.train_data = f"pipe:aws s3 cp {args.train_data} -"
+    if args.val_data is not None and args.val_data.startswith('s3'):
+        args.val_data = f"pipe:aws s3 cp {args.val_data} -"
+        
     if torch.cuda.is_available():
         # This enables tf32 on Ampere GPUs which is only 8% slower than
         # float16 and almost as accurate as float32

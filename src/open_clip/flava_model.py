@@ -120,6 +120,21 @@ class MultimodalTransformer(nn.Module):
         self.ln_post = norm_layer(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
+        self.init_parameters()
+
+    def init_parameters(self):
+        nn.init.normal_(self.class_embedding, std=0.02)
+        nn.init.normal_(self.positional_embedding, std=0.01)
+
+        proj_std = (self.transformer.width ** -0.5) * ((2 * self.transformer.layers) ** -0.5)
+        attn_std = self.transformer.width ** -0.5
+        fc_std = (2 * self.transformer.width) ** -0.5
+        for block in self.transformer.resblocks:
+            nn.init.normal_(block.attn.in_proj_weight, std=attn_std)
+            nn.init.normal_(block.attn.out_proj.weight, std=proj_std)
+            nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
+            nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
+
     def lock(self, unlocked_groups=0, freeze_bn_stats=False):
         assert unlocked_groups == 0, 'partial locking not currently supported for this model'
         for param in self.parameters():
@@ -165,8 +180,8 @@ class FLAVAVisionCfg:
 
     # MAE parameters
     mae_mask_ratio: float = 0.75
-    mae_decoder_layers: int = 2,
-    mae_decoder_width: int = 512,
+    mae_decoder_layers: int = 2
+    mae_decoder_width: int = 512
     mae_decoder_heads: int = 4
 
 
@@ -291,7 +306,11 @@ class FLAVA(nn.Module):
         text_context_length = text_cfg.context_length  # includes CLS_T token
 
         # unimodal MLM
-        self.mlm_head = nn.Linear(embed_dim, self.text.config.vocab_size)
+        self.mlm_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.GELU(),
+            nn.Linear(embed_dim * 2, self.text.config.vocab_size),
+        )
 
         # unimodal MAE
         self.mae_mask_ratio = vision_cfg.mae_mask_ratio
@@ -312,14 +331,26 @@ class FLAVA(nn.Module):
         self.text_to_mm_projection = nn.Linear(embed_dim, multimodal_cfg.width)
 
         # Cross-modal MLM
-        self.mm_mlm_head = nn.Linear(embed_dim, self.text.config.vocab_size)
+        self.mm_mlm_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.GELU(),
+            nn.Linear(embed_dim * 2, self.text.config.vocab_size),
+        )
 
         # Cross-modal MAE
         self.mm_patch_mask_token = nn.Parameter(multimodal_cfg.width ** -0.5 * torch.randn(multimodal_cfg.width))
-        self.mm_mae_head = nn.Linear(embed_dim, vision_cfg.patch_size ** 2 * 3, bias=True)  # patch reconstruction
+        self.mm_mae_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.GELU(),
+            nn.Linear(embed_dim * 2, vision_cfg.patch_size ** 2 * 3, bias=True),  # patch reconstruction
+        )
 
         # ITM
-        self.itm_head = nn.Linear(embed_dim, 1)
+        self.itm_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.GELU(),
+            nn.Linear(embed_dim * 2, 1),
+        )
 
         # Output projections
         self.image_projection = nn.Linear(embed_dim, embed_dim)
@@ -328,6 +359,12 @@ class FLAVA(nn.Module):
 
         # Contrastive logit scale
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+
+        self.init_parameters()
+
+    def init_parameters(self):
+        nn.init.normal_(self.patch_mask_token, std=0.02)
+        nn.init.normal_(self.mm_patch_mask_token, std=0.02)
 
     @torch.jit.ignore
     def set_grad_checkpointing(self, enable=True):
@@ -364,6 +401,22 @@ class FLAVA(nn.Module):
         mm_encoding = self.mm_projection(cls_m)
         return F.normalize(mm_encoding, dim=-1) if normalize else mm_encoding
 
+    def forward_itm(self, image, text):
+        h_image, _, _ = self.visual(image, mask_ratio=0)
+        h_text = self.text(text)
+        mm_h_image = self.image_to_mm_projection(h_image)
+        mm_h_text = self.text_to_mm_projection(h_text)
+
+        # Multimodal attention mask (ignore text padding tokens)
+        mm_text_attn_mask = (text != self.text.config.pad_token_id).long()
+        mm_vis_attn_mask = torch.ones(*h_image.shape[:2], dtype=torch.long, device=mm_text_attn_mask.device)
+        mm_attn_mask = torch.cat([mm_vis_attn_mask, mm_text_attn_mask], dim=1)
+
+        mm_input = torch.cat([mm_h_image, mm_h_text], dim=1)
+        h_m = self.multimodal(mm_input, attn_mask=mm_attn_mask)
+        cls_m = h_m[:, 0, :]
+        return self.itm_head(self.mm_projection(cls_m))
+
     def forward_mlm(self, *, text_masked, mlm_labels):
         h_masked_text = self.text(text_masked)
         mlm_logits = self.mlm_head(self.text_projection(h_masked_text[:, 1:, :]))
@@ -396,7 +449,7 @@ class FLAVA(nn.Module):
             'image': image,
         }
 
-    def forward_flava(self, *, image, text, text_masked, itm_text, mlm_labels, itm_labels):
+    def forward_flava(self, *, image, text, text_masked, itm_neg_text_idx, mlm_labels, itm_labels):
         # Language features
         h_text = self.text(text)
         cls_t = h_text[:, 0, :]
@@ -425,7 +478,7 @@ class FLAVA(nn.Module):
         mm_h_text = self.text_to_mm_projection(h_text)
         mm_h_masked_image = self.image_to_mm_projection(h_masked_image)
         mm_h_masked_text = self.text_to_mm_projection(h_masked_text)
-        mm_h_itm_text = self.text_to_mm_projection(self.text(itm_text))  # TODO: save text transformer fwd pass by using indices
+        mm_h_itm_text = self.text_to_mm_projection(h_text[itm_neg_text_idx])
 
         # Image-text matching
         mm_itm_input = torch.cat([mm_h_image, mm_h_itm_text], dim=1)
@@ -456,7 +509,7 @@ class FLAVA(nn.Module):
         mm_mae_input = torch.cat([mm_image_with_mask_tokens, mm_h_text], dim=1)
         h_m_mae = self.multimodal(mm_mae_input, attn_mask=mm_attn_mask)
         mm_masked_patches_pred = h_m_mae[:, 1:mm_image_with_mask_tokens.shape[1] + 1, :]
-        mm_mae_logits = self.mm_mae_head(self.mm_projection(mm_masked_patches_pred[:, 1:, :])) # remove cls token
+        mm_mae_logits = self.mm_mae_head(self.mm_projection(mm_masked_patches_pred[:, 1:, :]))  # remove cls token
 
         return {
             # contrastive outputs
@@ -482,7 +535,7 @@ class FLAVA(nn.Module):
         image=None,
         text=None,
         text_masked=None,
-        itm_text=None,
+        itm_neg_text_idx=None,
 
         # passthrough
         mlm_labels=None,
@@ -501,14 +554,14 @@ class FLAVA(nn.Module):
         else:
             assert image is not None and \
                    text is not None and \
-                   itm_text is not None and \
+                   itm_neg_text_idx is not None and \
                    mlm_labels is not None and \
                    itm_labels is not None
             return self.forward_flava(
                 image=image,
                 text=text,
                 text_masked=text_masked,
-                itm_text=itm_text,
+                itm_neg_text_idx=itm_neg_text_idx,
                 mlm_labels=mlm_labels,
                 itm_labels=itm_labels,
             )

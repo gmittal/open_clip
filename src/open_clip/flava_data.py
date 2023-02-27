@@ -28,13 +28,12 @@ def get_flava_collate(hf_tokenizer, mlm_prob=0.15, itm_prob=0.1):
         }
 
         # ITM
-        itm_labels = torch.bernoulli(torch.ones(len(image)) * (1 - itm_prob))
-        negative_text_idx = (torch.where(itm_labels == 0)[0] + 1) % len(text)
-
-        itm_text = text.clone()
-        itm_text[torch.where(itm_labels == 0)] = text[negative_text_idx]
+        bs = len(image)
+        itm_labels = torch.bernoulli(torch.ones(bs) * (1 - itm_prob))
+        batch_idx = torch.arange(bs)
+        negative_text_idx = torch.where(itm_labels == 1, batch_idx, (batch_idx + 1) % bs)
         batch.update({
-            "itm_text": itm_text,
+            "itm_neg_text_idx": negative_text_idx,
             "itm_labels": itm_labels,
         })
 
