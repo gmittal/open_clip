@@ -77,6 +77,24 @@ def parse_args(args):
     parser.add_argument(
         "--seed", type=int, default=0, help="Default random seed."
     )
+    parser.add_argument(
+        "--separator-token",
+        default="<end_of_text>"
+        type=str,
+        help="Separator token.",
+    )
+    parser.add_argument(
+        "--validation-key",
+        default="validation",
+        type=str,
+        help="Validation key.",
+    )
+    parser.add_argument(
+        "--test-key",
+        default="test",
+        type=str,
+        help="Test key.",
+    )
 
     args = parser.parse_args(args)
     return args
@@ -116,11 +134,14 @@ class GLUEDataset(Dataset):
         super().__init__()
 
         try:
-            from datasets import load_dataset
+            from datasets import load_dataset, load_from_disk
         except ImportError:
             raise ImportError("Please install HF datasets: pip install datasets")
-
-        self.dataset = load_dataset("glue", task, split=split)
+        special_tasks = {'mnli', 'mrpc'}
+        if task in special_tasks:
+            self.dataset = load_from_disk(task, split=split)
+        else:
+            self.dataset = load_dataset("glue", task, split=split)
         self.label_key = label_key
         self.text_key = text_key
         self.length = len(self.dataset)
@@ -165,7 +186,7 @@ def get_task_dataloaders(args):
     task_name = args.task_name
 
     dataloaders = {}
-    for split_name in ["train", "validation", "test"]:
+    for split_name in ["train", args.validation_key, args.test_key]:
         dataset = GLUEDataset(
             task_name,
             split_name,
