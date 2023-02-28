@@ -79,7 +79,7 @@ def parse_args(args):
     )
     parser.add_argument(
         "--separator-token",
-        default="<end_of_text>"
+        default="<end_of_text>",
         type=str,
         help="Separator token.",
     )
@@ -137,11 +137,10 @@ class GLUEDataset(Dataset):
             from datasets import load_dataset, load_from_disk
         except ImportError:
             raise ImportError("Please install HF datasets: pip install datasets")
-        special_tasks = {'mnli', 'mrpc'}
-        if task in special_tasks:
-            self.dataset = load_from_disk(task, split=split)
-        else:
+        try:
             self.dataset = load_dataset("glue", task, split=split)
+        except ValueError:
+            self.dataset = load_from_disk(task, split=split)
         self.label_key = label_key
         self.text_key = text_key
         self.length = len(self.dataset)
