@@ -140,7 +140,7 @@ class GLUEDataset(Dataset):
         try:
             self.dataset = load_dataset("glue", task, split=split)
         except ValueError:
-            self.dataset = load_from_disk(task, split=split)
+            self.dataset = load_from_disk(task)
         self.label_key = label_key
         self.text_key = text_key
         self.length = len(self.dataset)
@@ -255,14 +255,14 @@ def train_one_epoch(model, data, epoch, optimizer, scheduler, early_stop, device
         progress_bar.update(1)
 
         if (i % args.val_frequency) == 0 and i > 0:
-            metrics = compute_metrics(model, data["validation"], device, args)
+            metrics = compute_metrics(model, data[validation_key], device, args)
             end_training = early_stop.step(metrics)
             if end_training:
                 progress_bar.close()
                 return metrics, end_training
 
     progress_bar.close()
-    metrics = compute_metrics(model, data["validation"], device, args)
+    metrics = compute_metrics(model, data[args.validation_key], device, args)
     end_training = early_stop.step(metrics)
     return metrics, end_training
 
