@@ -9,7 +9,7 @@ def parse_args(args):
     parser.add_argument('--prompt2-key', type=str, default='hypothesis')
     parser.add_argument('--train-key', type=str, default='train')
     parser.add_argument('--validation-key', type=str, default='validation_matched')
-    parser.add_argument('--out-path', type=str)
+    parser.add_argument('--out-path', type=str, default='mnli_combined', help='Output dataset path; should be in format <task>_combined')
     parser.add_argument('--separator-token', type=str, default='<end_of_text>')
 
     args = parser.parse_args(args)

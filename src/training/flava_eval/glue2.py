@@ -176,7 +176,10 @@ def get_task_metric(task_name):
     if task_name == "cola":
         metric = evaluate.load("glue", "stsb")
     else:
-        metric = evaluate.load("glue", task_name)
+        if '_' in task_name:
+            metric = evaluate.load("glue", task_name.split('_')[0])
+        else:
+            metric = evaluate.load("glue", task_name)
     return metric
 
 
