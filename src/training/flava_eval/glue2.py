@@ -246,7 +246,7 @@ def compute_metrics(model, dataloader, device, args):
             logits = model(text)
             logits = logits.view(-1)
             label = label.view(-1).float()
-            predictions = torch.sigmoid(logits) > 0.5
+            predictions = torch.argmax(torch.sigmoid(logits))
             batch_val_loss = LOSS_FN[args.task_name](logits, label, reduction='sum')
         val_loss += batch_val_loss.item()
         metric.add_batch(
