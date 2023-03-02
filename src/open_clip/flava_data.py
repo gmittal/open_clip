@@ -4,7 +4,7 @@ from transformers import DataCollatorForLanguageModeling
 from .tokenizer import HFTokenizer
 
 
-def get_flava_collate(hf_tokenizer, mlm_prob=0.15, itm_prob=0.1):
+def get_flava_collate(hf_tokenizer, mlm_prob=0.15, itm_prob=0.1, context_length=77, unimodal_mlm_context_length=512):
     assert isinstance(hf_tokenizer, HFTokenizer), 'tokenizer must be HFTokenizer'
     tokenizer = hf_tokenizer.tokenizer
     mlm_collator = DataCollatorForLanguageModeling(
