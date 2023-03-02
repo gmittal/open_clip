@@ -148,7 +148,7 @@ class GLUEDataset(Dataset):
         
         self.dataset = load_dataset("glue", task, split=split)
         self.label_key = label_key
-        self.text_key = text_key
+        self.text_key = text_key # list of strings
         self.length = len(self.dataset)
         self.tokenize = tokenizer
         self.task = task
@@ -169,7 +169,7 @@ class GLUEDataset(Dataset):
             }
         else:
             item = self.dataset[idx]
-            text = item[self.text_key]
+            text = item[self.text_key[0]]
             label = item[self.label_key]
             return {
                 'text': self.tokenize([text])[0],
@@ -207,7 +207,7 @@ def get_task_dataloaders(args):
         dataset = GLUEDataset(
             task_name,
             split_name,
-            text_key=args.text_key,
+            text_key=args.text_key.split(","),
             label_key="label",
             tokenizer=tokenizer,
             separator_token=args.separator_token
