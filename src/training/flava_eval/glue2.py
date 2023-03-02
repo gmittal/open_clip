@@ -27,6 +27,13 @@ TEXT_KEYS = defaultdict(lambda: ("sentence",),
                      "qqp": ("question1", "question2"),
                      "rte": ("sentence1", "sentence2"),
                      "stsb": ("sentence1", "sentence2")})
+LOSS_FN = defaultdict(lambda: nn.functional.binary_cross_entropy_with_logits,
+                    {"mnli": nn.functional.binary_cross_entropy_with_logits,
+                     "mrpc": nn.functional.binary_cross_entropy_with_logits,
+                     "qnli": nn.functional.cross_entropy,
+                     "qqp": nn.functional.binary_cross_entropy_with_logits,
+                     "rte": nn.functional.cross_entropy,
+                     "stsb": nn.functional.mse_loss})
 
 def parse_args(args):
     parser = argparse.ArgumentParser()
@@ -240,7 +247,7 @@ def compute_metrics(model, dataloader, device, args):
             logits = logits.view(-1)
             label = label.view(-1).float()
             predictions = torch.sigmoid(logits) > 0.5
-            batch_val_loss = nn.functional.binary_cross_entropy_with_logits(logits, label, reduction='sum')
+            batch_val_loss = LOSS_FN[args.task_name](logits, label, reduction='sum')
         val_loss += batch_val_loss.item()
         metric.add_batch(
             predictions=predictions.cpu().numpy(),
@@ -265,7 +272,7 @@ def train_one_epoch(model, data, epoch, optimizer, scheduler, early_stop, device
         logits = model(text)
         logits = logits.view(-1)
         label = label.view(-1).float()
-        loss = nn.functional.binary_cross_entropy_with_logits(logits, label)
+        loss = LOSS_FN[args.task_name](logits, label)
 
         optimizer.zero_grad()
         loss.backward()
