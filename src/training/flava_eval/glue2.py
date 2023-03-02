@@ -1,11 +1,12 @@
 import argparse
 import os
 import sys
+from collections import defaultdict
 
 import torch
-from torch import nn
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 import open_clip
@@ -18,6 +19,14 @@ try:
 except ImportError:
     raise ImportError("Please install HF evaluate: pip install evaluate")
 
+MULTI_PROMPT_TASKS = {"mnli", "mrpc", "qnli", "qqp", "rte", "stsb"}
+TEXT_KEYS = defaultdict(lambda: ("sentence",),
+                    {"mnli": ("premise", "hypothesis"),
+                     "mrpc": ("sentence1", "sentence2"),
+                     "qnli": ("question", "sentence"),
+                     "qqp": ("question1", "question2"),
+                     "rte": ("sentence1", "sentence2"),
+                     "stsb": ("sentence1", "sentence2")})
 
 def parse_args(args):
     parser = argparse.ArgumentParser()
@@ -84,12 +93,6 @@ def parse_args(args):
         help="Separator token.",
     )
     parser.add_argument(
-        "--text-key",
-        default="sentence",
-        type=str,
-        help="Text key. Should either be a single string or two strings, comma separated.",
-    )
-    parser.add_argument(
         "--validation-key",
         default="validation",
         type=str,
@@ -101,7 +104,6 @@ def parse_args(args):
         type=str,
         help="Test key.",
     )
-    parser.add_argument('--train-key', type=str, default='train')
 
     args = parser.parse_args(args)
     return args
@@ -157,7 +159,7 @@ class GLUEDataset(Dataset):
         return self.length
 
     def __getitem__(self, idx):
-        if self.task == 'mnli' or self.task == 'mrpc':
+        if self.task in MULTI_PROMPT_TASKS:
             item = self.dataset[idx]
             text1 = item[self.text_key[0]]
             text2 = item[self.text_key[1]]
@@ -206,7 +208,7 @@ def get_task_dataloaders(args):
         dataset = GLUEDataset(
             task_name,
             split_name,
-            text_key=args.text_key.split(","),
+            text_key=TEXT_KEYS[task_name],
             label_key="label",
             tokenizer=tokenizer,
             separator_token=args.separator_token
