@@ -58,7 +58,7 @@ def parse_args(args):
     parser.add_argument("--eps", type=float, default=1e-8, help="Adam epsilon.")
     parser.add_argument("--wd", type=float, default=0.0, help="Weight decay.")
     parser.add_argument(
-        "--warmup", type=int, default=0.06, help="Warmup rate."
+        "--warmup", type=float, default=0.06, help="Warmup rate."
     )
     parser.add_argument(
         "--val-frequency", type=int, default=100, help="How often to run evaluation with val data."
