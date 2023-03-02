@@ -84,6 +84,12 @@ def parse_args(args):
         help="Separator token.",
     )
     parser.add_argument(
+        "--text-key",
+        default="sentence",
+        type=str,
+        help="Text key. Should either be a single string or two strings, comma separated.",
+    )
+    parser.add_argument(
         "--validation-key",
         default="validation",
         type=str,
@@ -95,6 +101,8 @@ def parse_args(args):
         type=str,
         help="Test key.",
     )
+    parser.add_argument('--train-key', type=str, default='train')
+    parser.add_argument('--validation-key', type=str, default='validation')
 
     args = parser.parse_args(args)
     return args
@@ -130,33 +138,43 @@ class EarlyStopping:
 class GLUEDataset(Dataset):
     """GLUE dataset."""
 
-    def __init__(self, task, split, text_key, label_key, tokenizer=None):
+    def __init__(self, task, split, text_key, label_key, separator_token='<end_of_text>', tokenizer=None):
         super().__init__()
 
         try:
-            from datasets import load_dataset, load_from_disk
+            from datasets import load_dataset
         except ImportError:
             raise ImportError("Please install HF datasets: pip install datasets")
-        try:
-            self.dataset = load_dataset("glue", task, split=split)
-        except ValueError:
-            self.dataset = load_from_disk(task)
+        
+        self.dataset = load_dataset("glue", task, split=split)
         self.label_key = label_key
         self.text_key = text_key
         self.length = len(self.dataset)
         self.tokenize = tokenizer
+        self.task = task
+        self.separator_token = separator_token
 
     def __len__(self):
         return self.length
 
     def __getitem__(self, idx):
-        item = self.dataset[idx]
-        text = item[self.text_key]
-        label = item[self.label_key]
-        return {
-            'text': self.tokenize([text])[0],
-            'label': label
-        }
+        if self.task == 'mnli' or self.task == 'mrpc':
+            item = self.dataset[idx]
+            text1 = item[self.text_key[0]]
+            text2 = item[self.text_key[1]]
+            label = item[self.label_key]
+            return {
+                'text': self.tokenize([text1])[0] + self.separator_token + self.tokenize([text2])[0],
+                'label': label
+            }
+        else:
+            item = self.dataset[idx]
+            text = item[self.text_key]
+            label = item[self.label_key]
+            return {
+                'text': self.tokenize([text])[0],
+                'label': label
+            }
 
 
 class TextClassifier(nn.Module):
@@ -176,10 +194,7 @@ def get_task_metric(task_name):
     if task_name == "cola":
         metric = evaluate.load("glue", "stsb")
     else:
-        if '_' in task_name:
-            metric = evaluate.load("glue", task_name.split('_')[0])
-        else:
-            metric = evaluate.load("glue", task_name)
+        metric = evaluate.load("glue", task_name)
     return metric
 
 
@@ -192,9 +207,10 @@ def get_task_dataloaders(args):
         dataset = GLUEDataset(
             task_name,
             split_name,
-            text_key="sentence",
+            text_key=args.text_key,
             label_key="label",
             tokenizer=tokenizer,
+            separator_token=args.separator_token
         )
         dataloader = DataLoader(
             dataset,
@@ -258,7 +274,7 @@ def train_one_epoch(model, data, epoch, optimizer, scheduler, early_stop, device
         progress_bar.update(1)
 
         if (i % args.val_frequency) == 0 and i > 0:
-            metrics = compute_metrics(model, data[validation_key], device, args)
+            metrics = compute_metrics(model, data[args.validation_key], device, args)
             end_training = early_stop.step(metrics)
             if end_training:
                 progress_bar.close()
