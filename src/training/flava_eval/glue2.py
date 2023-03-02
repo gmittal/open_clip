@@ -1,3 +1,4 @@
+import pdb
 import argparse
 import os
 import sys
@@ -34,6 +35,13 @@ LOSS_FN = defaultdict(lambda: nn.functional.binary_cross_entropy_with_logits,
                      "qqp": nn.functional.binary_cross_entropy_with_logits,
                      "rte": nn.functional.cross_entropy,
                      "stsb": nn.functional.mse_loss})
+NUM_LABELS = defaultdict(lambda: 2,
+                    {"mnli": 3,
+                        "mrpc": 2,
+                        "qnli": 3,
+                        "qqp": 2,
+                        "rte": 3,
+                        "stsb": 1})
 
 def parse_args(args):
     parser = argparse.ArgumentParser()
@@ -246,7 +254,8 @@ def compute_metrics(model, dataloader, device, args):
             logits = model(text)
             logits = logits.view(-1)
             label = label.view(-1).float()
-            predictions = torch.argmax(torch.sigmoid(logits))
+            predictions = torch.argmax(torch.sigmoid(logits), dim=-1)
+            pdb.set_trace()
             batch_val_loss = LOSS_FN[args.task_name](logits, label, reduction='sum')
         val_loss += batch_val_loss.item()
         metric.add_batch(
@@ -307,7 +316,7 @@ def main(args):
     embed_dim = model_cfg["embed_dim"]
 
     data = get_task_dataloaders(args)
-    clf = TextClassifier(model, embed_dim, 1).to(device)
+    clf = TextClassifier(model, embed_dim, NUM_LABELS[args.task_name]).to(device)
     optim = torch.optim.AdamW(clf.parameters(), lr=args.lr, weight_decay=args.wd)
 
     total_steps = len(data["train"]) * args.epochs
