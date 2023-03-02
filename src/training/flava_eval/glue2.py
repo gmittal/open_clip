@@ -28,7 +28,7 @@ TEXT_KEYS = defaultdict(lambda: ("sentence",),
                      "rte": ("sentence1", "sentence2"),
                      "stsb": ("sentence1", "sentence2")})
 LOSS_FN = defaultdict(lambda: nn.functional.binary_cross_entropy_with_logits,
-                    {"mnli": nn.functional.binary_cross_entropy_with_logits,
+                    {"mnli": nn.functional.cross_entropy,
                      "mrpc": nn.functional.binary_cross_entropy_with_logits,
                      "qnli": nn.functional.cross_entropy,
                      "qqp": nn.functional.binary_cross_entropy_with_logits,
