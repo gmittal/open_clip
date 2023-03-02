@@ -102,7 +102,6 @@ def parse_args(args):
         help="Test key.",
     )
     parser.add_argument('--train-key', type=str, default='train')
-    parser.add_argument('--validation-key', type=str, default='validation')
 
     args = parser.parse_args(args)
     return args
@@ -164,7 +163,7 @@ class GLUEDataset(Dataset):
             text2 = item[self.text_key[1]]
             label = item[self.label_key]
             return {
-                'text': self.tokenize([text1])[0] + self.separator_token + self.tokenize([text2])[0],
+                'text': self.tokenize([text1 + self.separator_token + text2])[0],
                 'label': label
             }
         else:
