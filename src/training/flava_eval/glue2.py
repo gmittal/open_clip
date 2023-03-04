@@ -253,8 +253,8 @@ def compute_metrics(model, dataloader, device, args):
             samples_seen += text.shape[0]
             logits = model(text)
             # logits = logits.view(-1)
-            label = label.view(-1).float()
-            predictions = torch.argmax(torch.sigmoid(logits), dim=-1)
+            label = label.view(-1).int()
+            predictions = torch.argmax(torch.sigmoid(logits, dim=-1), dim=-1).int()
             batch_val_loss = LOSS_FN[args.task_name](logits, label, reduction='sum')
         val_loss += batch_val_loss.item()
         metric.add_batch(
@@ -279,7 +279,8 @@ def train_one_epoch(model, data, epoch, optimizer, scheduler, early_stop, device
 
         logits = model(text)
         # logits = logits.view(-1)
-        label = label.view(-1).float()
+        label = label.view(-1).int()
+        logits = torch.argmax(torch.sigmoid(logits, dim=-1), dim=-1).int()
         loss = LOSS_FN[args.task_name](logits, label)
 
         optimizer.zero_grad()
