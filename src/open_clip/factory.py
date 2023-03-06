@@ -73,7 +73,6 @@ def get_model_config(model_name):
 
 
 def get_tokenizer(model_name, unimodal=False):
-    # TODO: clean up unimodal abstraction
     config = get_model_config(model_name)
     if unimodal:
         context_length = config['text_cfg']['unimodal_context_length']

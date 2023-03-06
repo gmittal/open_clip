@@ -607,7 +607,6 @@ def get_data(args, preprocess_fns, epoch=0, tokenizer=None, collate_fn=None):
     # FLAVA unimodal data sources
     is_flava = args.model.startswith('flava')
     if is_flava and args.flava_unimodal_mlm:
-        # TODO: clean up unimodal tokenizer creation
         unimodal_tokenizer = get_tokenizer(args.model, unimodal=True)
         data["flava-mlm"] = get_hf_text_dataset(
             args,

@@ -134,9 +134,9 @@ class MLMLoss(nn.Module):
         labels = labels.reshape(-1)
 
         # only compute loss on masked logits
-        masked_logits = logits[labels != self.ignore_index]
-        masked_labels = labels[labels != self.ignore_index]
-
+        mask = (labels != self.ignore_index)
+        masked_logits = logits[mask]
+        masked_labels = labels[mask]
         return F.cross_entropy(masked_logits, masked_labels, ignore_index=self.ignore_index)
 
 
@@ -185,7 +185,8 @@ class MAELoss(nn.Module):
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
 
-        loss = (pred[mask == 1] - target[mask == 1]) ** 2
+        one_mask = (mask == 1)
+        loss = (pred[one_mask] - target[one_mask]) ** 2
         loss = loss.mean()  # mean loss on removed patches
         return loss
 
