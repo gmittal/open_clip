@@ -22,7 +22,7 @@ from webdataset.filters import _shuffle
 from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
 
 from open_clip.factory import get_tokenizer
-from open_clip.flava_data import flava_imagenet_collate, get_mlm_collate
+from open_clip.flava_data import get_mlm_collate
 
 try:
     import horovod.torch as hvd
