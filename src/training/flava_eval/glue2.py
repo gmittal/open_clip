@@ -35,11 +35,11 @@ LOSS_FN = defaultdict(lambda: nn.functional.binary_cross_entropy_with_logits,
                      "qqp": nn.functional.binary_cross_entropy_with_logits,
                      "rte": nn.functional.cross_entropy,
                      "stsb": nn.functional.mse_loss})
-NUM_LABELS = defaultdict(lambda: 2,
+NUM_LABELS = defaultdict(lambda: 1,
                     {"mnli": 3,
-                        "mrpc": 2,
+                        "mrpc": 1,
                         "qnli": 3,
-                        "qqp": 2,
+                        "qqp": 1,
                         "rte": 3,
                         "stsb": 1})
 
@@ -252,7 +252,6 @@ def compute_metrics(model, dataloader, device, args):
             label = batch["label"].to(device)
             samples_seen += text.shape[0]
             logits = model(text)
-            label = label.view(-1)
             predictions = torch.argmax(logits, dim=-1).float()
             batch_val_loss = LOSS_FN[args.task_name](logits, label, reduction='sum')
         val_loss += batch_val_loss.item()
@@ -277,7 +276,6 @@ def train_one_epoch(model, data, epoch, optimizer, scheduler, early_stop, device
         label = batch["label"].to(device)
 
         logits = model(text)
-        label = label.view(-1)
         loss = LOSS_FN[args.task_name](logits, label)
 
         optimizer.zero_grad()
