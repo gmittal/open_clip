@@ -134,9 +134,8 @@ class MLMLoss(nn.Module):
         labels = labels.reshape(-1)
 
         # only compute loss on masked logits
-        masked_idx = torch.where(labels != self.ignore_index)
-        masked_logits = logits[masked_idx]
-        masked_labels = labels[masked_idx]
+        masked_logits = logits[labels != self.ignore_index]
+        masked_labels = labels[labels != self.ignore_index]
 
         return F.cross_entropy(masked_logits, masked_labels, ignore_index=self.ignore_index)
 

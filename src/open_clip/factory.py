@@ -72,11 +72,16 @@ def get_model_config(model_name):
         return None
 
 
-def get_tokenizer(model_name):
+def get_tokenizer(model_name, unimodal=False):
+    # TODO: clean up unimodal abstraction
     config = get_model_config(model_name)
+    if unimodal:
+        context_length = config['text_cfg']['context_length']
+    else:
+        context_length = config['text_cfg']['unimodal_context_length']
     tokenizer = HFTokenizer(
         tokenizer_name=config['text_cfg']['hf_tokenizer_name'],
-        context_length=config['text_cfg']['context_length'],
+        context_length=context_length,
     ) if 'hf_tokenizer_name' in config['text_cfg'] else tokenize
     return tokenizer
 

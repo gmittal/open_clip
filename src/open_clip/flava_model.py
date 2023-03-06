@@ -188,7 +188,7 @@ class FLAVAVisionCfg:
 @dataclass
 class FLAVATextCfg:
     context_length: int = 77
-    mlm_context_length: int = 512
+    unimodal_context_length: int = 512
     hf_model_name: str = None
     hf_tokenizer_name: str = None
     hf_model_pretrained: bool = True

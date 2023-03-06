@@ -21,6 +21,7 @@ from torch.utils.data.distributed import DistributedSampler
 from webdataset.filters import _shuffle
 from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
 
+from open_clip.factory import get_tokenizer
 from open_clip.flava_data import flava_imagenet_collate, get_mlm_collate
 
 try:
@@ -161,7 +162,7 @@ def get_imagenet(args, preprocess_fns, split, flava_unimodal=False, collate_fn=N
         sampler = None
 
     sampler = DistributedSampler(dataset) if args.distributed and flava_unimodal else None
-    shuffle = flava_unimodal and sampler is None
+    shuffle = sampler is None
     batch_size = args.flava_unimodal_mae_batch_size if flava_unimodal else args.batch_size
 
     dataloader = torch.utils.data.DataLoader(
@@ -169,7 +170,6 @@ def get_imagenet(args, preprocess_fns, split, flava_unimodal=False, collate_fn=N
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=args.workers,
-        pin_memory=flava_unimodal,
         sampler=sampler,
         collate_fn=collate_fn,
         drop_last=flava_unimodal,
@@ -437,7 +437,7 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
         batch_size=None,
         shuffle=False,
         num_workers=args.workers,
-        persistent_workers=True,
+        persistent_workers=False,
     )
 
     # FIXME not clear which approach is better, with_epoch before vs after dataloader?
@@ -512,7 +512,6 @@ def get_hf_text_dataset(args, epoch=0, tokenizer=None, collate_fn=None):
         batch_size=args.flava_unimodal_mlm_batch_size,
         shuffle=shuffle,
         num_workers=args.workers,
-        pin_memory=True,
         sampler=sampler,
         collate_fn=collate_fn,
         drop_last=True,
@@ -608,11 +607,13 @@ def get_data(args, preprocess_fns, epoch=0, tokenizer=None, collate_fn=None):
     # FLAVA unimodal data sources
     is_flava = args.model.startswith('flava')
     if is_flava and args.flava_unimodal_mlm:
+        # TODO: clean up unimodal tokenizer creation
+        unimodal_tokenizer = get_tokenizer(args.model, unimodal=True)
         data["flava-mlm"] = get_hf_text_dataset(
             args,
             epoch=epoch,
-            tokenizer=tokenizer,
-            collate_fn=get_mlm_collate(tokenizer, args.flava_mlm_prob),
+            tokenizer=unimodal_tokenizer,
+            collate_fn=get_mlm_collate(unimodal_tokenizer, args.flava_mlm_prob),
         )
 
     if is_flava and args.flava_unimodal_mae:
