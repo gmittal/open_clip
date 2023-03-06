@@ -66,8 +66,3 @@ def get_mlm_collate(hf_tokenizer, mlm_prob=0.15):
         }
 
     return collate
-
-
-def flava_imagenet_collate(example_list):
-    image_list, _ = zip(*example_list)
-    return {"image": torch.stack(image_list)}

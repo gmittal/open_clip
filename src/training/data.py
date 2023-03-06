@@ -39,19 +39,41 @@ class HFTextDataset(Dataset):
 
         logging.debug(f'Loading HuggingFace dataset from {name}.')
         self.df = load_dataset(name, split=split)
+        self.size = len(self.df)
         self.text_key = text_key
         logging.debug('Done loading data.')
 
         self.tokenize = tokenizer
 
     def __len__(self):
-        return len(self.df)
+        return self.size
 
     def __getitem__(self, idx):
         text = self.tokenize([str(self.df[idx][self.text_key])])[0]
-        return {
-            'text': text,
-         }
+        return {'text': text}
+
+
+class HFImageDataset(Dataset):
+    def __init__(self, name, split, transforms, image_key):
+        try:
+            from datasets import load_dataset
+        except ImportError:
+            raise ImportError('Please install datasets with `pip install datasets`.')
+
+        logging.debug(f'Loading HuggingFace dataset from {name}.')
+        self.df = load_dataset(name, split=split)
+        self.size = len(self.df)
+        self.image_key = image_key
+        logging.debug('Done loading data.')
+
+        self.transforms = transforms
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, idx):
+        image = self.transforms(self.df[idx][self.image_key])
+        return {'image': image}
 
 
 class CsvDataset(Dataset):
@@ -522,6 +544,35 @@ def get_hf_text_dataset(args, epoch=0, tokenizer=None, collate_fn=None):
     return DataInfo(dataloader, sampler)
 
 
+def get_hf_image_dataset(args, epoch=0, transforms=None, collate_fn=None):
+    dataset_name = args.flava_unimodal_mae
+    assert dataset_name
+
+    dataset = HFImageDataset(
+        dataset_name,
+        split="train",
+        transforms=transforms,
+        image_key="image",
+    )
+    num_samples = len(dataset)
+    sampler = DistributedSampler(dataset) if args.distributed else None
+    shuffle = sampler is None
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.flava_unimodal_mae_batch_size,
+        shuffle=shuffle,
+        num_workers=args.workers,
+        sampler=sampler,
+        collate_fn=collate_fn,
+        drop_last=True,
+    )
+    dataloader.num_samples = num_samples
+    dataloader.num_batches = len(dataloader)
+
+    return DataInfo(dataloader, sampler)
+
+
 class SyntheticDataset(Dataset):
 
     def __init__(self, transform=None, image_size=(224, 224), caption="Dummy caption", dataset_size=100, tokenizer=None):
@@ -616,13 +667,11 @@ def get_data(args, preprocess_fns, epoch=0, tokenizer=None, collate_fn=None):
         )
 
     if is_flava and args.flava_unimodal_mae:
-        # TODO: make this configurable to arbitrary ImageNet path
-        data["flava-mae"] = get_imagenet(
+        data["flava-mae"] = get_hf_image_dataset(
             args,
-            preprocess_fns,
-            "val",
-            flava_unimodal=True,
-            collate_fn=flava_imagenet_collate,
+            epoch=epoch,
+            transforms=preprocess_train,
+            collate_fn=None,
         )
 
     return data

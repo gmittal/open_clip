@@ -396,8 +396,8 @@ def parse_args(args):
     )
     parser.add_argument(
         "--flava-unimodal-mae",
-        type=bool,
-        default=False,
+        type=str,
+        default=None,
         help="Dataset used for unimodal image encoder pre-training with MAE."
     )
     parser.add_argument(
