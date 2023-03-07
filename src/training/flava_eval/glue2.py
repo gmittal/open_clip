@@ -66,7 +66,7 @@ def parse_args(args):
     parser.add_argument("--eps", type=float, default=1e-8, help="Adam epsilon.")
     parser.add_argument("--wd", type=float, default=0.0, help="Weight decay.")
     parser.add_argument(
-        "--warmup", type=float, default=0.06, help="Warmup rate."
+        "--warmup", type=int, default=100, help="Warmup steps."
     )
     parser.add_argument(
         "--val-frequency", type=int, default=100, help="How often to run evaluation with val data."
@@ -323,7 +323,7 @@ def main(args):
     optim = torch.optim.AdamW(clf.parameters(), lr=args.lr, weight_decay=args.wd)
 
     total_steps = len(data["train"]) * args.epochs
-    scheduler = cosine_lr(optim, args.lr, int(args.warmup * total_steps), total_steps)
+    scheduler = cosine_lr(optim, args.lr, args.warmup, total_steps)
     early_stop = EarlyStopping(  # greater metric value is better
         patience=args.early_stop_patience,
         threshold=args.early_stop_threshold,
