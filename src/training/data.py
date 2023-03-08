@@ -146,7 +146,7 @@ def get_dataset_size(shards):
     return total_size, num_shards
 
 
-def get_imagenet(args, preprocess_fns, split, flava_unimodal=False, collate_fn=None):
+def get_imagenet(args, preprocess_fns, split):
     assert split in ["train", "val", "v2"]
     is_train = split == "train"
     preprocess_train, preprocess_val = preprocess_fns
@@ -163,7 +163,6 @@ def get_imagenet(args, preprocess_fns, split, flava_unimodal=False, collate_fn=N
             preprocess_fn = preprocess_val
         assert data_path
 
-        preprocess_fn = preprocess_train if flava_unimodal and split == "val" else preprocess_fn
         dataset = datasets.ImageFolder(data_path, transform=preprocess_fn)
 
     if is_train:
@@ -183,18 +182,11 @@ def get_imagenet(args, preprocess_fns, split, flava_unimodal=False, collate_fn=N
     else:
         sampler = None
 
-    sampler = DistributedSampler(dataset) if args.distributed and flava_unimodal else None
-    shuffle = sampler is None
-    batch_size = args.flava_unimodal_mae_batch_size if flava_unimodal else args.batch_size
-
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
+        batch_size=args.batch_size,
         num_workers=args.workers,
         sampler=sampler,
-        collate_fn=collate_fn,
-        drop_last=flava_unimodal,
     )
 
     return DataInfo(dataloader=dataloader, sampler=sampler)
