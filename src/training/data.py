@@ -451,7 +451,7 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
         batch_size=None,
         shuffle=False,
         num_workers=args.workers,
-        persistent_workers=False,
+        persistent_workers=True,
     )
 
     # FIXME not clear which approach is better, with_epoch before vs after dataloader?
@@ -507,16 +507,12 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None, coll
     return DataInfo(dataloader, sampler)
 
 
-def get_hf_text_dataset(args, epoch=0, tokenizer=None, collate_fn=None):
+def get_hf_text_dataset(args, split, text_key="text", epoch=0, tokenizer=None, collate_fn=None):
     dataset_name = args.flava_unimodal_mlm
     assert dataset_name
+    is_train = (split == "train")
 
-    dataset = HFTextDataset(
-        dataset_name,
-        split='train',
-        text_key='text',
-        tokenizer=tokenizer
-    )
+    dataset = HFTextDataset(dataset_name, split=split, text_key=text_key, tokenizer=tokenizer)
     num_samples = len(dataset)
     sampler = DistributedSampler(dataset) if args.distributed else None
     shuffle = sampler is None
@@ -528,7 +524,7 @@ def get_hf_text_dataset(args, epoch=0, tokenizer=None, collate_fn=None):
         num_workers=args.workers,
         sampler=sampler,
         collate_fn=collate_fn,
-        drop_last=True,
+        drop_last=is_train,
     )
     dataloader.num_samples = num_samples
     dataloader.num_batches = len(dataloader)
@@ -536,16 +532,12 @@ def get_hf_text_dataset(args, epoch=0, tokenizer=None, collate_fn=None):
     return DataInfo(dataloader, sampler)
 
 
-def get_hf_image_dataset(args, epoch=0, transforms=None, collate_fn=None):
+def get_hf_image_dataset(args, split, image_key="image", epoch=0, transforms=None, collate_fn=None):
     dataset_name = args.flava_unimodal_mae
     assert dataset_name
+    is_train = (split == "train")
 
-    dataset = HFImageDataset(
-        dataset_name,
-        split="train",
-        transforms=transforms,
-        image_key="image",
-    )
+    dataset = HFImageDataset(dataset_name, split=split, transforms=transforms, image_key=image_key)
     num_samples = len(dataset)
     sampler = DistributedSampler(dataset) if args.distributed else None
     shuffle = sampler is None
@@ -557,7 +549,7 @@ def get_hf_image_dataset(args, epoch=0, transforms=None, collate_fn=None):
         num_workers=args.workers,
         sampler=sampler,
         collate_fn=collate_fn,
-        drop_last=True,
+        drop_last=is_train,
     )
     dataloader.num_samples = num_samples
     dataloader.num_batches = len(dataloader)
@@ -653,6 +645,7 @@ def get_data(args, preprocess_fns, epoch=0, tokenizer=None, collate_fn=None):
         unimodal_tokenizer = get_tokenizer(args.model, unimodal=True)
         data["flava-mlm"] = get_hf_text_dataset(
             args,
+            "train",
             epoch=epoch,
             tokenizer=unimodal_tokenizer,
             collate_fn=get_mlm_collate(unimodal_tokenizer, args.flava_mlm_prob),
@@ -661,6 +654,7 @@ def get_data(args, preprocess_fns, epoch=0, tokenizer=None, collate_fn=None):
     if is_flava and args.flava_unimodal_mae:
         data["flava-mae"] = get_hf_image_dataset(
             args,
+            "train",
             epoch=epoch,
             transforms=preprocess_train,
             collate_fn=None,
