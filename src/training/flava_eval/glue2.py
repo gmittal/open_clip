@@ -233,8 +233,8 @@ def get_task_dataloaders(args):
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.workers,
-            pin_memory=True,
-            drop_last=True,
+            pin_memory=False,
+            drop_last=split_name == "train",
         )
         dataloaders[split_name] = dataloader
 
