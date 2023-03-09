@@ -202,6 +202,7 @@ def get_task_dataloaders(transforms, args):
 
     dataloaders = {}
     for split_name in ["train", "validation", "test"]:
+        is_train = (split_name == "train")
         dataset = HatefulMemesDataset(
             hm_path,
             split_name,
@@ -211,10 +212,9 @@ def get_task_dataloaders(transforms, args):
         dataloader = DataLoader(
             dataset,
             batch_size=args.batch_size,
-            shuffle=True,
+            shuffle=is_train,
             num_workers=args.workers,
-            pin_memory=True,
-            drop_last=True,
+            drop_last=is_train,
         )
         dataloaders[split_name] = dataloader
 
