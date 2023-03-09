@@ -189,16 +189,16 @@ def tokenize(texts: Union[str, List[str]], context_length: int = 77) -> torch.Lo
 
 
 class HFTokenizer:
-    """HuggingFace tokenizer wrapper"""
-
-    def __init__(self, tokenizer_name: str):
+    "HuggingFace tokenizer wrapper"
+    def __init__(self, tokenizer_name:str, context_length:int=77):
         from transformers import AutoTokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.context_length = context_length
 
     def save_pretrained(self, dest):
         self.tokenizer.save_pretrained(dest)
 
-    def __call__(self, texts: Union[str, List[str]], context_length: int = 77) -> torch.Tensor:
+    def __call__(self, texts:Union[str, List[str]]) -> torch.Tensor:
         # same cleaning as for default tokenizer, except lowercasing
         # adding lower (for case-sensitive tokenizers) will make it more robust but less sensitive to nuance
         if isinstance(texts, str):
@@ -207,7 +207,7 @@ class HFTokenizer:
         input_ids = self.tokenizer(
             texts,
             return_tensors='pt',
-            max_length=context_length,
+            max_length=self.context_length,
             padding='max_length',
             truncation=True,
         ).input_ids

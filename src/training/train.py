@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import math
@@ -45,6 +46,28 @@ def postprocess_clip_output(model_out):
         "logit_scale": model_out[2]
     }
 
+class Batch(dict):
+    """Batch wrapper for a dictionary of tensors."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(self, *args, **kwargs)
+
+    def size(self):
+        if self.keys():
+            k = list(self.keys())[0]
+            return len(self[k])
+        return 0
+
+    def to(self, *, device, non_blocking=False, dtypes={}):
+        for k, v in self.items():
+            if isinstance(v, torch.Tensor):
+                dtype = dtypes.get(k, v.dtype)
+                self[k] = v.to(device=device, non_blocking=non_blocking, dtype=dtype)
+            elif isinstance(v, dict):
+                self[k] = Batch(v).to(device=device, non_blocking=non_blocking, dtypes=dtypes)
+        return self
+
+
 def unwrap_model(model):
     if hasattr(model, 'module'):
         return model.module
@@ -63,6 +86,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     device = torch.device(args.device)
     autocast = get_autocast(args.precision)
     cast_dtype = get_cast_dtype(args.precision)
+    is_flava = args.model.startswith('flava')
 
 
     model.train()
@@ -74,7 +98,16 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     num_batches_per_epoch = dataloader.num_batches // args.accum_freq
     sample_digits = math.ceil(math.log(dataloader.num_samples + 1, 10))
 
+    # FLAVA unimodal dataloaders
+    if is_flava and args.flava_unimodal_mae:
+        data['flava-mae'].set_epoch(epoch)
+        mae_dataloader = iter(data['flava-mae'].dataloader)
+    if is_flava and args.flava_unimodal_mlm:
+        data['flava-mlm'].set_epoch(epoch)
+        mlm_dataloader = iter(data['flava-mlm'].dataloader)
+
     if args.accum_freq > 1:
+        assert not args.model.startswith('flava'), 'FLAVA does not support gradient accumulation'
         accum_images, accum_texts, accum_features = [], [], {}
 
     losses_m = {}
@@ -88,38 +121,80 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         if not args.skip_scheduler:
             scheduler(step)
 
-        images, texts = batch
-        images = images.to(device=device, dtype=cast_dtype, non_blocking=True)
-        texts = texts.to(device=device, non_blocking=True)
+        dtypes = {'image': cast_dtype}
+        batch = Batch(**batch).to(device=device, non_blocking=True, dtypes=dtypes)
+
+        # FLAVA unimodal batches
+        if is_flava and args.flava_unimodal_mae:
+            try:
+                mae_batch = next(mae_dataloader)
+            except:
+                mae_dataloader = iter(data['flava-mae'].dataloader)
+                mae_batch = next(mae_dataloader)
+            mae_batch = Batch(**mae_batch).to(device=device, non_blocking=True, dtypes=dtypes)
+
+        if is_flava and args.flava_unimodal_mlm:
+            try:
+                mlm_batch = next(mlm_dataloader)
+            except:
+                mlm_dataloader = iter(data['flava-mlm'].dataloader)
+                mlm_batch = next(mlm_dataloader)
+            mlm_batch = Batch(**mlm_batch).to(device=device, non_blocking=True, dtypes=dtypes)
 
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
 
         if args.accum_freq == 1:
+            no_grad_sync = model.no_sync if args.distributed else contextlib.nullcontext
+            losses_dict = {}
+
+            # FLAVA unimodal forward passes
+            if is_flava and args.flava_unimodal_mlm:
+                with no_grad_sync():
+                    with autocast():
+                        mlm_out = model(**mlm_batch, unimodal_mlm=True)
+                        mlm_losses = loss.forward_mlm(**mlm_out)
+                        total_mlm_loss = sum(mlm_losses.values())
+                        losses_dict["unimodal_mlm_loss"] = total_mlm_loss
+                    backward(total_mlm_loss, scaler)
+
+            if is_flava and args.flava_unimodal_mae:
+                with no_grad_sync():
+                    with autocast():
+                        mae_out = model(**mae_batch, unimodal_mae=True)
+                        mae_losses = loss.forward_mae(**mae_out)
+                        total_mae_loss = sum(mae_losses.values())
+                        losses_dict["unimodal_mae_loss"] = total_mae_loss
+                    backward(total_mae_loss, scaler)
+
+            # FLAVA multimodal forward pass
             with autocast():
-                model_out = model(images, texts)
-                logit_scale = model_out["logit_scale"]
+                model_out = model(**batch)
+                assert isinstance(model_out, dict)
                 if args.distill:
                     with torch.no_grad():
                         dist_model_out = dist_model(images, texts)
                     model_out.update({f'dist_{k}' : v for k, v in dist_model_out.items()})
-                losses = loss(**model_out, output_dict=True)
-
-                total_loss = sum(losses.values())
-                losses["loss"] = total_loss
-
+                losses = loss(**model_out)
+                if isinstance(losses, dict):
+                    total_loss = sum(losses.values())
+                    losses["loss"] = total_loss
+                else:
+                    total_loss = losses
+                    losses = {"loss": losses}
+                losses_dict.update(losses)
             backward(total_loss, scaler)
+
         else:
             # First, cache the features without any gradient tracking.
             with torch.no_grad():
                 with autocast():
-                    model_out = model(images, texts)
-                    model_out.pop("logit_scale")
-                    for key, val in model_out.items():
-                        if key in accum_features:
-                            accum_features[key].append(val)
-                        else:
-                            accum_features[key] = [val]
+                    output = model(**batch)
+                    assert isinstance(output, dict)
+                    chunk_image_features = output["image_features"]
+                    chunk_text_features = output["text_features"]
+                accum_image_features.append(chunk_image_features)
+                accum_text_features.append(chunk_text_features)
 
                 accum_images.append(images)
                 accum_texts.append(texts)
@@ -137,16 +212,16 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 images = accum_images[j]
                 texts = accum_texts[j]
                 with autocast():
-                    model_out = model(images, texts)
+                    model_out = model(image=images, text=texts)
                     logit_scale = model_out.pop("logit_scale")
                     inputs = {}
                     for key, val in accum_features.items():
                         accumulated = accum_features[key]
                         inputs[key] = torch.cat(accumulated[:j] +  [model_out[key]] + accumulated[j + 1:])
-                    losses = loss(**inputs, logit_scale=logit_scale, output_dict=True)
+                    losses_dict = loss(**inputs, logit_scale=logit_scale, output_dict=True)
                     del inputs
-                    total_loss = sum(losses.values())
-                    losses["loss"] = total_loss
+                    total_loss = sum(losses_dict.values())
+                    losses_dict["loss"] = total_loss
                 backward(total_loss, scaler)
 
         if scaler is not None:
@@ -179,22 +254,23 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         batch_time_m.update(time.time() - end)
         end = time.time()
         batch_count = i_accum + 1
-        if is_master(args) and (i_accum % args.log_every_n_steps == 0 or batch_count == num_batches_per_epoch):
-            batch_size = len(images)
+        if is_master(args) and ((i_accum % args.log_every_n_steps) == 0 or batch_count == num_batches_per_epoch):
+            batch_size = batch.size()
             num_samples = batch_count * batch_size * args.accum_freq * args.world_size
             samples_per_epoch = dataloader.num_samples
             percent_complete = 100.0 * batch_count / num_batches_per_epoch
 
             # NOTE loss is coarsely sampled, just master node and per log update
-            for key, val in losses.items():
+            for key, val in losses_dict.items():
                 if key not in losses_m:
                     losses_m[key] = AverageMeter()
                 losses_m[key].update(val.item(), batch_size)
 
+            logit_scale = model_out['logit_scale']
             logit_scale_scalar = logit_scale.item()
             loss_log = " ".join(
                 [
-                    f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})" 
+                    f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})"
                     for loss_name, loss_m in losses_m.items()
                 ]
             )
@@ -216,7 +292,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 "samples_per_second_per_gpu": samples_per_second_per_gpu,
                 "scale": logit_scale_scalar,
                 "lr": optimizer.param_groups[0]["lr"]
-            }            
+            }
             log_data.update({name:val.val for name,val in losses_m.items()})
 
             for name, val in log_data.items():
@@ -258,24 +334,22 @@ def evaluate(model, data, epoch, args, tb_writer=None):
         all_image_features, all_text_features = [], []
         with torch.no_grad():
             for i, batch in enumerate(dataloader):
-                images, texts = batch
-                images = images.to(device=device, dtype=cast_dtype, non_blocking=True)
-                texts = texts.to(device=device, non_blocking=True)
+                batch = Batch(**batch).to(device=device, non_blocking=True, dtypes={'image': cast_dtype})
 
                 with autocast():
-                    model_out = model(images, texts)
-                    image_features = model_out["image_features"]
-                    text_features = model_out["text_features"]
-                    logit_scale = model_out["logit_scale"]
+                    output = model(**batch)
                     # features are accumulated in CPU tensors, otherwise GPU memory exhausted quickly
                     # however, system RAM is easily exceeded and compute time becomes problematic
+                    image_features, text_features, logit_scale = output['image_features'], \
+                                                                 output['text_features'], \
+                                                                 output['logit_scale']
                     all_image_features.append(image_features.cpu())
                     all_text_features.append(text_features.cpu())
                     logit_scale = logit_scale.mean()
                     logits_per_image = logit_scale * image_features @ text_features.t()
                     logits_per_text = logits_per_image.t()
 
-                    batch_size = images.shape[0]
+                    batch_size = batch.size()
                     labels = torch.arange(batch_size, device=device).long()
                     total_loss = (
                         F.cross_entropy(logits_per_image, labels) +
