@@ -19,6 +19,7 @@ from training.data import get_imagenet
 from training.scheduler import cosine_lr
 from training.train import AverageMeter
 from training.zero_shot import zero_shot_eval
+from training.precision import get_autocast
 
 try:
     import evaluate
@@ -43,7 +44,7 @@ def parse_args(args):
     parser.add_argument(
         "--epochs", type=int, default=1000, help="Number of epochs to train for."
     )
-    parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
     parser.add_argument("--beta1", type=float, default=0.9, help="Adam beta 1.")
     parser.add_argument("--beta2", type=float, default=0.999, help="Adam beta 2.")
     parser.add_argument("--eps", type=float, default=1e-8, help="Adam epsilon.")
@@ -61,7 +62,7 @@ def parse_args(args):
         "--early-stop-threshold", type=float, default=0.0, help="Early stopping threshold."
     )
     parser.add_argument(
-        "--early-stop-metric-name", type=str, default="roc_auc", help="Early stopping metric name."
+        "--early-stop-metric-name", type=str, default="accuracy", help="Early stopping metric name."
     )
     parser.add_argument(
         "--precision",
@@ -91,7 +92,7 @@ def parse_args(args):
 
 class EarlyStopping:
 
-    def __init__(self, patience=5, threshold=0.0, metric_name="roc_auc"):
+    def __init__(self, patience=5, threshold=0.0, metric_name="accuracy"):
         self.patience = patience
         self.threshold = threshold
         self.patience_counter = 0
@@ -162,7 +163,10 @@ class VQAEval(object):
             '(', ')', '=', '+', '\\', '_', '-',
             '>', '<', '@', '`', ',', '?', '!']
 
-    def process_punctation(self, text):
+    def __init__(self):
+        self.acc_qa = []
+
+    def process_punctuation(self, text):
         out_text = text
         for p in self.punct:
             if (p + ' ' in text or ' ' + p in text) or (re.search(self.commaStrip, text) != None):
@@ -188,64 +192,65 @@ class VQAEval(object):
         return out_text
 
     def add_batch(self, *, answers, annotations):
-        assert len(answers) == len(annotations["question_id"])
+        assert len(answers) == len(annotations)
 
-        acc_qa = []
-        for i, qid in enumerate(annotations["question_id"]):
-
-            for ansDic in annotations["answers"]:
+        for i, annotation in enumerate(annotations):
+            for ansDic in annotation["answers"]:
                 ansDic['answer'] = ansDic['answer'].replace('\n', ' ')
                 ansDic['answer'] = ansDic['answer'].replace('\t', ' ')
                 ansDic['answer'] = ansDic['answer'].strip()
-            resAns = res[quesId]['answer']
+            resAns = answers[i]
             resAns = resAns.replace('\n', ' ')
             resAns = resAns.replace('\t', ' ')
             resAns = resAns.strip()
             gtAcc = []
-            gtAnswers = [ans['answer'] for ans in gts[quesId]['answers']]
+            gtAnswers = [ans['answer'] for ans in annotation["answers"]]
 
             if len(set(gtAnswers)) > 1:
-                for ansDic in gts[quesId]['answers']:
-                    ansDic['answer'] = self.process_punctation(ansDic['answer'])
+                for ansDic in annotation["answers"]:
+                    ansDic['answer'] = self.process_punctuation(ansDic['answer'])
                     ansDic['answer'] = self.process_article(ansDic['answer'])
-                resAns = self.processPunctuation(resAns)
-                resAns = self.processDigitArticle(resAns)
+                resAns = self.process_punctuation(resAns)
+                resAns = self.process_article(resAns)
 
-            for gtAnsDatum in gts[quesId]['answers']:
-                otherGTAns = [item for item in gts[quesId]['answers'] if item!=gtAnsDatum]
+            for gtAnsDatum in annotation["answers"]:
+                otherGTAns = [item for item in annotation["answers"] if item!=gtAnsDatum]
                 matchingAns = [item for item in otherGTAns if item['answer']==resAns]
                 acc = min(1, float(len(matchingAns))/3)
                 gtAcc.append(acc)
-            quesType    = gts[quesId]['question_type']
-            ansType     = gts[quesId]['answer_type']
+            quesType    = annotation['question_type']
+            ansType     = annotation['answer_type']
             avgGTAcc = float(sum(gtAcc))/len(gtAcc)
-            accQA.append(avgGTAcc)
-            if quesType not in accQuesType:
-                accQuesType[quesType] = []
-            accQuesType[quesType].append(avgGTAcc)
-            if ansType not in accAnsType:
-                accAnsType[ansType] = []
-            accAnsType[ansType].append(avgGTAcc)
-            self.setEvalQA(quesId, avgGTAcc)
-            self.setEvalQuesType(quesId, quesType, avgGTAcc)
-            self.setEvalAnsType(quesId, ansType, avgGTAcc)
-            if step%100 == 0:
-                self.updateProgress(step/float(len(quesIds)))
-            step = step + 1
+            self.acc_qa.append(avgGTAcc)
+            # if quesType not in accQuesType:
+            #     accQuesType[quesType] = []
+            # accQuesType[quesType].append(avgGTAcc)
+            # if ansType not in accAnsType:
+            #     accAnsType[ansType] = []
+            # accAnsType[ansType].append(avgGTAcc)
+            # self.setEvalQA(quesId, avgGTAcc)
+            # self.setEvalQuesType(quesId, quesType, avgGTAcc)
+            # self.setEvalAnsType(quesId, ansType, avgGTAcc)
+            # if step%100 == 0:
+            #     self.updateProgress(step/float(len(quesIds)))
+            # step = step + 1
 
-        # compute accuracy here
-
+    def compute(self):
+        acc = round(100*float(sum(self.acc_qa))/len(self.acc_qa), 2)
+        self.acc_qa = []
+        return {'accuracy': acc}
 
 
 class VQAv2Dataset(Dataset):
     """VQAv2 dataset."""
 
-    def __init__(self, split, label2id, transforms, tokenizer=None):
+    def __init__(self, split, label2id, id2label, transforms, tokenizer=None):
         super().__init__()
 
         self.df = load_dataset("HuggingFaceM4/VQAv2", split=split)
         self.length = len(self.df)
         self.label2id = label2id
+        self.id2label = id2label
         self.transforms = transforms
         self.tokenize = tokenizer
 
@@ -336,8 +341,8 @@ def vqa_collate(example_list):
     for example in example_list:
         images.append(example["image"])
         texts.append(example["text"])
-        labels.append(example["labels"])
-        annotations.append(example["annotations"])
+        labels.append(example["label"])
+        annotations.append(example["annotation"])
     images = torch.stack(images)
     texts = torch.stack(texts)
     labels = torch.stack(labels)
@@ -349,8 +354,9 @@ def vqa_collate(example_list):
     }
 
 
-def get_task_dataloaders(label2id, transforms, args):
+def get_task_dataloaders(id_mappings, transforms, args):
     tokenizer = get_tokenizer(args.model)
+    label2id, id2label = id_mappings
 
     dataloaders = {}
     for split_name in ["train", "validation", "test"]:
@@ -358,6 +364,7 @@ def get_task_dataloaders(label2id, transforms, args):
         dataset = VQAv2Dataset(
             split_name,
             label2id,
+            id2label,
             transforms,
             tokenizer=tokenizer,
         )
@@ -376,46 +383,44 @@ def get_task_dataloaders(label2id, transforms, args):
 
 def compute_metrics(model, dataloader, device, args):
     model.eval()
-    metric = evaluate.load("roc_auc")
-    val_loss = 0
+    metric = VQAEval()
+    id2label = dataloader.dataset.id2label
     samples_seen = 0
-    for batch in dataloader:
+    step = 0
+    val_batches = 20
+    for batch in tqdm(dataloader, total=val_batches):
+        if step == val_batches: break
         with torch.no_grad():
             image = batch["image"].to(device)
             text = batch["text"].to(device)
-            label = batch["label"].to(device)
-            samples_seen += text.shape[0]
             logits = model(image, text)
-            logits = logits.view(-1)
-            label = label.view(-1).float()
-            pred_scores = torch.sigmoid(logits)
-            batch_val_loss = nn.functional.binary_cross_entropy_with_logits(logits, label, reduction='sum')
-        val_loss += batch_val_loss.item()
+        samples_seen += text.shape[0]
+        step += 1
+        answer_ids = logits.argmax(dim=-1).cpu().numpy()
+        pred_answers = [id2label[aid] for aid in answer_ids]
+        gt_annotations = batch["annotation"]
         metric.add_batch(
-            prediction_scores=pred_scores.cpu().numpy(),
-            references=label.cpu().numpy(),
+            answers=pred_answers,
+            annotations=gt_annotations,
         )
     model.train()
     metrics = metric.compute()
-    metrics["loss"] = val_loss / samples_seen
     return metrics
 
 
 def train_one_epoch(model, data, epoch, optimizer, scheduler, early_stop, device, args):
+    autocast = get_autocast(args.precision)
     model.train()
     progress_bar = tqdm(total=len(data["train"]))
     for i, batch in enumerate(data["train"]):
         step = epoch * len(data["train"]) + i
         scheduler(step)
-
-        import pdb; pdb.set_trace()
-
-        image = batch["image"].to(device)
-        text = batch["text"].to(device)
-        label = batch["label"].to(device)
-
-        logits = model(image, text)
-        loss = nn.functional.binary_cross_entropy_with_logits(logits, label) * label.shape[1]
+        with autocast():
+            image = batch["image"].to(device)
+            text = batch["text"].to(device)
+            label = batch["label"].to(device)
+            logits = model(image, text)
+            loss = nn.functional.binary_cross_entropy_with_logits(logits, label) * label.shape[1]
 
         optimizer.zero_grad()
         loss.backward()
@@ -456,7 +461,7 @@ def main(args):
     config = ViltConfig.from_pretrained("dandelin/vilt-b32-finetuned-vqa")
     label2id = config.label2id
     id2label = config.id2label
-    data = get_task_dataloaders(label2id, preprocess_val, args)
+    data = get_task_dataloaders((label2id, id2label), preprocess_val, args)
     clf_cls = FLAVAMultimodalClassifier if args.model.startswith("flava") else CLIPMultimodalClassifier
     clf = clf_cls(model, embed_dim, len(label2id)).to(device)
     optim = torch.optim.AdamW(clf.parameters(), lr=args.lr, weight_decay=args.wd)
