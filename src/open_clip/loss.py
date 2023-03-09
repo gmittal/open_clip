@@ -334,6 +334,8 @@ class FlavaLoss(ClipLoss):
         # itm
         itm_logits,
         itm_labels,
+
+        output_dict=False,
     ):
         clip_loss = super().forward(image_features, text_features, logit_scale)
         itm_loss = self.itm_loss(itm_logits, itm_labels)
@@ -345,9 +347,11 @@ class FlavaLoss(ClipLoss):
         mm_mlm_loss = self.mlm_loss_weight * mm_mlm_loss
         mm_mae_loss = self.mae_loss_weight * mm_mae_loss
 
-        return {
-            "contrastive_loss": clip_loss,
-            "itm_loss": itm_loss,
-            "mlm_loss": mm_mlm_loss,
-            "mae_loss": mm_mae_loss,
-        }
+        if output_dict:
+            return {
+                "contrastive_loss": clip_loss,
+                "itm_loss": itm_loss,
+                "mlm_loss": mm_mlm_loss,
+                "mae_loss": mm_mae_loss,
+            }
+        return clip_loss, itm_loss, mm_mlm_loss, mm_mae_loss

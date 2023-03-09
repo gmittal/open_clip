@@ -167,9 +167,9 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                         losses_dict["unimodal_mae_loss"] = total_mae_loss
                     backward(total_mae_loss, scaler)
 
-            # FLAVA multimodal forward pass
+            # Multimodal forward pass
             with autocast():
-                model_out = model(**batch)
+                model_out = model(**batch, output_dict=True)
                 assert isinstance(model_out, dict)
                 if args.distill:
                     with torch.no_grad():
@@ -189,7 +189,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             # First, cache the features without any gradient tracking.
             with torch.no_grad():
                 with autocast():
-                    output = model(**batch)
+                    output = model(**batch, output_dict=True)
                     assert isinstance(output, dict)
                     chunk_image_features = output["image_features"]
                     chunk_text_features = output["text_features"]
@@ -212,7 +212,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 images = accum_images[j]
                 texts = accum_texts[j]
                 with autocast():
-                    model_out = model(image=images, text=texts)
+                    model_out = model(image=images, text=texts, output_dict=True)
                     logit_scale = model_out.pop("logit_scale")
                     inputs = {}
                     for key, val in accum_features.items():
@@ -337,7 +337,7 @@ def evaluate(model, data, epoch, args, tb_writer=None):
                 batch = Batch(**batch).to(device=device, non_blocking=True, dtypes={'image': cast_dtype})
 
                 with autocast():
-                    output = model(**batch)
+                    output = model(**batch, output_dict=True)
                     # features are accumulated in CPU tensors, otherwise GPU memory exhausted quickly
                     # however, system RAM is easily exceeded and compute time becomes problematic
                     image_features, text_features, logit_scale = output['image_features'], \

@@ -560,6 +560,8 @@ class FLAVA(nn.Module):
         # unimodal flags
         unimodal_mae=False,
         unimodal_mlm=False,
+
+        output_dict=True,
     ):
         if unimodal_mlm:
             assert text_masked is not None and mlm_labels is not None
