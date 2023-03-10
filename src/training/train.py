@@ -356,7 +356,7 @@ def evaluate(model, data, epoch, args, tb_writer=None):
                         F.cross_entropy(logits_per_text, labels)
                     ) / 2
 
-                    gen_loss = maybe_compute_generative_loss(model_out)
+                    gen_loss = maybe_compute_generative_loss(output)
 
                 cumulative_loss += total_loss * batch_size
                 num_samples += batch_size
