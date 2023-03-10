@@ -1,11 +1,13 @@
+import pdb
 import argparse
 import os
 import sys
+from collections import defaultdict
 
 import torch
-from torch import nn
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 import open_clip
@@ -18,6 +20,20 @@ try:
 except ImportError:
     raise ImportError("Please install HF evaluate: pip install evaluate")
 
+MULTI_SENTENCE_TASKS = {"mnli", "mrpc", "qnli", "qqp", "rte", "stsb"}
+TEXT_KEYS = defaultdict(lambda: ("sentence",),
+                    {"mnli": ("premise", "hypothesis"),
+                     "mrpc": ("sentence1", "sentence2"),
+                     "qnli": ("question", "sentence"),
+                     "qqp": ("question1", "question2"),
+                     "rte": ("sentence1", "sentence2"),
+                     "stsb": ("sentence1", "sentence2")})
+NUM_LABELS = {"mnli": 3,
+                "mrpc": 2,
+                "qnli": 3,
+                "qqp": 2,
+                "rte": 3,
+                "stsb": 1}
 
 def parse_args(args):
     parser = argparse.ArgumentParser()
@@ -42,7 +58,7 @@ def parse_args(args):
     parser.add_argument("--eps", type=float, default=1e-8, help="Adam epsilon.")
     parser.add_argument("--wd", type=float, default=0.0, help="Weight decay.")
     parser.add_argument(
-        "--warmup", type=int, default=1000, help="Number of steps to warmup for."
+        "--warmup", type=int, default=100, help="Warmup steps."
     )
     parser.add_argument(
         "--val-frequency", type=int, default=100, help="How often to run evaluation with val data."
@@ -76,6 +92,24 @@ def parse_args(args):
     )
     parser.add_argument(
         "--seed", type=int, default=0, help="Default random seed."
+    )
+    parser.add_argument(
+        "--separator-token",
+        default="<end_of_text>",
+        type=str,
+        help="Separator token.",
+    )
+    parser.add_argument(
+        "--validation-key",
+        default="validation",
+        type=str,
+        help="Validation key.",
+    )
+    parser.add_argument(
+        "--test-key",
+        default="test",
+        type=str,
+        help="Test key.",
     )
 
     args = parser.parse_args(args)
@@ -112,7 +146,7 @@ class EarlyStopping:
 class GLUEDataset(Dataset):
     """GLUE dataset."""
 
-    def __init__(self, task, split, text_key, label_key, tokenizer=None):
+    def __init__(self, task, split, text_key, label_key, separator_token='<end_of_text>', tokenizer=None):
         super().__init__()
 
         try:
@@ -122,21 +156,33 @@ class GLUEDataset(Dataset):
 
         self.dataset = load_dataset("glue", task, split=split)
         self.label_key = label_key
-        self.text_key = text_key
+        self.text_key = text_key # list of strings
         self.length = len(self.dataset)
         self.tokenize = tokenizer
+        self.task = task
+        self.separator_token = separator_token
 
     def __len__(self):
         return self.length
 
     def __getitem__(self, idx):
-        item = self.dataset[idx]
-        text = item[self.text_key]
-        label = item[self.label_key]
-        return {
-            'text': self.tokenize([text])[0],
-            'label': label
-        }
+        if self.task in MULTI_SENTENCE_TASKS:
+            item = self.dataset[idx]
+            text1 = item[self.text_key[0]]
+            text2 = item[self.text_key[1]]
+            label = item[self.label_key]
+            return {
+                'text': self.tokenize([text1 + self.separator_token + text2])[0],
+                'label': label
+            }
+        else:
+            item = self.dataset[idx]
+            text = item[self.text_key[0]]
+            label = item[self.label_key]
+            return {
+                'text': self.tokenize([text])[0],
+                'label': label
+            }
 
 
 class TextClassifier(nn.Module):
@@ -165,21 +211,22 @@ def get_task_dataloaders(args):
     task_name = args.task_name
 
     dataloaders = {}
-    for split_name in ["train", "validation", "test"]:
+    for split_name in ["train", args.validation_key, args.test_key]:
         dataset = GLUEDataset(
             task_name,
             split_name,
-            text_key="sentence",
+            text_key=TEXT_KEYS[task_name],
             label_key="label",
             tokenizer=tokenizer,
+            separator_token=args.separator_token
         )
         dataloader = DataLoader(
             dataset,
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.workers,
-            pin_memory=True,
-            drop_last=True,
+            pin_memory=False,
+            drop_last=split_name == "train",
         )
         dataloaders[split_name] = dataloader
 
@@ -197,10 +244,9 @@ def compute_metrics(model, dataloader, device, args):
             label = batch["label"].to(device)
             samples_seen += text.shape[0]
             logits = model(text)
-            logits = logits.view(-1)
-            label = label.view(-1).float()
-            predictions = torch.sigmoid(logits) > 0.5
-            batch_val_loss = nn.functional.binary_cross_entropy_with_logits(logits, label, reduction='sum')
+            predictions = torch.argmax(logits, dim=-1).float()
+            loss_fn = nn.functional.mse_loss if args.task_name == "stsb" else nn.functional.cross_entropy
+            batch_val_loss = loss_fn[args.task_name](logits, label, reduction='sum')
         val_loss += batch_val_loss.item()
         metric.add_batch(
             predictions=predictions.cpu().numpy(),
@@ -223,9 +269,8 @@ def train_one_epoch(model, data, epoch, optimizer, scheduler, early_stop, device
         label = batch["label"].to(device)
 
         logits = model(text)
-        logits = logits.view(-1)
-        label = label.view(-1).float()
-        loss = nn.functional.binary_cross_entropy_with_logits(logits, label)
+        loss_fn = nn.functional.mse_loss if args.task_name == "stsb" else nn.functional.cross_entropy
+        loss = loss_fn[args.task_name](logits, label)
 
         optimizer.zero_grad()
         loss.backward()
@@ -235,14 +280,14 @@ def train_one_epoch(model, data, epoch, optimizer, scheduler, early_stop, device
         progress_bar.update(1)
 
         if (i % args.val_frequency) == 0 and i > 0:
-            metrics = compute_metrics(model, data["validation"], device, args)
+            metrics = compute_metrics(model, data[args.validation_key], device, args)
             end_training = early_stop.step(metrics)
             if end_training:
                 progress_bar.close()
                 return metrics, end_training
 
     progress_bar.close()
-    metrics = compute_metrics(model, data["validation"], device, args)
+    metrics = compute_metrics(model, data[args.validation_key], device, args)
     end_training = early_stop.step(metrics)
     return metrics, end_training
 
@@ -260,7 +305,7 @@ def main(args):
     embed_dim = model_cfg["embed_dim"]
 
     data = get_task_dataloaders(args)
-    clf = TextClassifier(model, embed_dim, 1).to(device)
+    clf = TextClassifier(model, embed_dim, NUM_LABELS[args.task_name]).to(device)
     optim = torch.optim.AdamW(clf.parameters(), lr=args.lr, weight_decay=args.wd)
 
     total_steps = len(data["train"]) * args.epochs
