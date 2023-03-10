@@ -167,7 +167,7 @@ def get_dataset_size(shards):
     return total_size, num_shards
 
 
-def get_imagenet(args, preprocess_fns, split, flava_unimodal=False, collate_fn=None):
+def get_imagenet(args, preprocess_fns, split):
     assert split in ["train", "val", "v2"]
     is_train = split == "train"
     preprocess_train, preprocess_val = preprocess_fns
@@ -184,7 +184,6 @@ def get_imagenet(args, preprocess_fns, split, flava_unimodal=False, collate_fn=N
             preprocess_fn = preprocess_val
         assert data_path
 
-        preprocess_fn = preprocess_train if flava_unimodal and split == "val" else preprocess_fn
         dataset = datasets.ImageFolder(data_path, transform=preprocess_fn)
 
     if is_train:
@@ -204,19 +203,11 @@ def get_imagenet(args, preprocess_fns, split, flava_unimodal=False, collate_fn=N
     else:
         sampler = None
 
-    sampler = DistributedSampler(dataset) if args.distributed and flava_unimodal else None
-    shuffle = flava_unimodal and sampler is None
-    batch_size = args.flava_unimodal_mae_batch_size if flava_unimodal else args.batch_size
-
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
+        batch_size=args.batch_size,
         num_workers=args.workers,
-        pin_memory=flava_unimodal,
         sampler=sampler,
-        collate_fn=collate_fn,
-        drop_last=flava_unimodal,
     )
 
     return DataInfo(dataloader=dataloader, sampler=sampler)
@@ -589,36 +580,6 @@ def get_hf_image_dataset(args, split, image_key="image", epoch=0, transforms=Non
         sampler=sampler,
         collate_fn=collate_fn,
         drop_last=is_train,
-    )
-    dataloader.num_samples = num_samples
-    dataloader.num_batches = len(dataloader)
-
-    return DataInfo(dataloader, sampler)
-
-
-def get_hf_text_dataset(args, epoch=0, tokenizer=None, collate_fn=None):
-    dataset_name = args.flava_unimodal_mlm
-    assert dataset_name
-
-    dataset = HFTextDataset(
-        dataset_name,
-        split='train',
-        text_key='text',
-        tokenizer=tokenizer
-    )
-    num_samples = len(dataset)
-    sampler = DistributedSampler(dataset) if args.distributed else None
-    shuffle = sampler is None
-
-    dataloader = DataLoader(
-        dataset,
-        batch_size=args.flava_unimodal_mlm_batch_size,
-        shuffle=shuffle,
-        num_workers=args.workers,
-        pin_memory=True,
-        sampler=sampler,
-        collate_fn=collate_fn,
-        drop_last=True,
     )
     dataloader.num_samples = num_samples
     dataloader.num_batches = len(dataloader)
