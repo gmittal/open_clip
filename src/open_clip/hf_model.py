@@ -91,6 +91,7 @@ class IdentityPooler(nn.Module):
 
 class HFEncoder(nn.Module):
     """HuggingFace model adapter"""
+    output_tokens: torch.jit.Final[bool]
 
     def __init__(
             self,
@@ -99,9 +100,11 @@ class HFEncoder(nn.Module):
             config: PretrainedConfig = None,
             pooler_type: str = None,
             proj: str = None,
-            pretrained: bool = True):
+            pretrained: bool = True,
+            output_tokens: bool = False,
+    ):
         super().__init__()
-
+        self.output_tokens = output_tokens
         self.output_dim = output_dim
 
         # TODO: find better way to get this information
@@ -132,9 +135,9 @@ class HFEncoder(nn.Module):
             self.image_size = to_2tuple(self.config.image_size)
 
         if pooler_type is None: # get default arch pooler
-            self.pooler = _POOLERS[(arch_dict[self.config.model_type]["pooler"])]()
-        else:
-            self.pooler = _POOLERS[pooler_type]()
+            pooler_type = (arch_dict[self.config.model_type]["pooler"])
+
+        self.pooler = _POOLERS[pooler_type]()
 
         d_model = getattr(self.config, arch_dict[self.config.model_type]["config_names"]["width"])
         if (d_model == output_dim) and (proj is None):  # do we always need a proj?
@@ -151,7 +154,7 @@ class HFEncoder(nn.Module):
         else:
             raise ValueError('d_model != output_dim but no projection layer specified')
 
-    def forward(self, x:TensorType) -> TensorType:
+    def forward(self, x: TensorType):
         # TODO: find better way to determine if image or text encoder
         if self.config.model_type.startswith("vit"):
             out = self.transformer(pixel_values=x)
@@ -160,8 +163,19 @@ class HFEncoder(nn.Module):
             attn_mask = (x != self.config.pad_token_id).long()
             out = self.transformer(input_ids=x, attention_mask=attn_mask)
             pooled_out = self.pooler(out, attn_mask)
+            projected = self.proj(pooled_out)
 
-        return self.proj(pooled_out)
+            seq_len = out.last_hidden_state.shape[1]
+            tokens = (
+                out.last_hidden_state[:, torch.arange(seq_len) != self.pooler.cls_token_position, :]
+                if type(self.pooler) == ClsPooler
+                else out.last_hidden_state
+            )
+
+            if self.output_tokens:
+                return projected, tokens
+
+        return projected
 
     def lock(self, unlocked_layers: int = 0, freeze_layer_norm: bool = True):
         if not unlocked_layers:  # full freezing

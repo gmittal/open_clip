@@ -8,13 +8,14 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.nn.parallel.distributed import DistributedDataParallel
 
 try:
     import wandb
 except ImportError:
     wandb = None
 
-from open_clip import get_cast_dtype
+from open_clip import get_cast_dtype, CLIP, CustomTextCLIP
 from .distributed import is_master
 from .zero_shot import zero_shot_eval
 from .precision import get_autocast
@@ -38,6 +39,12 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
+def postprocess_clip_output(model_out):
+    return {
+        "image_features": model_out[0],
+        "text_features": model_out[1],
+        "logit_scale": model_out[2]
+    }
 
 class Batch(dict):
     """Batch wrapper for a dictionary of tensors."""
@@ -75,13 +82,16 @@ def backward(total_loss, scaler):
         total_loss.backward()
 
 
-def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args, tb_writer=None):
+def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=None):
     device = torch.device(args.device)
     autocast = get_autocast(args.precision)
     cast_dtype = get_cast_dtype(args.precision)
     is_flava = args.model.startswith('flava')
 
+
     model.train()
+    if args.distill:
+        dist_model.eval()
 
     data['train'].set_epoch(epoch)  # set epoch in process safe manner via sampler or shared_epoch
     dataloader = data['train'].dataloader
@@ -98,7 +108,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args
 
     if args.accum_freq > 1:
         assert not args.model.startswith('flava'), 'FLAVA does not support gradient accumulation'
-        accum_images, accum_texts, accum_image_features, accum_text_features = [], [], [], []
+        accum_images, accum_texts, accum_features = [], [], {}
 
     losses_m = {}
     batch_time_m = AverageMeter()
@@ -157,11 +167,15 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args
                         losses_dict["unimodal_mae_loss"] = total_mae_loss
                     backward(total_mae_loss, scaler)
 
-            # FLAVA multimodal forward pass
+            # Multimodal forward pass
             with autocast():
-                model_out = model(**batch)
+                model_out = model(**batch, output_dict=True)
                 assert isinstance(model_out, dict)
-                losses = loss(**model_out)
+                if args.distill:
+                    with torch.no_grad():
+                        dist_model_out = dist_model(images, texts)
+                    model_out.update({f'dist_{k}' : v for k, v in dist_model_out.items()})
+                losses = loss(**model_out, output_dict=True)
                 if isinstance(losses, dict):
                     total_loss = sum(losses.values())
                     losses["loss"] = total_loss
@@ -169,14 +183,13 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args
                     total_loss = losses
                     losses = {"loss": losses}
                 losses_dict.update(losses)
-
             backward(total_loss, scaler)
 
         else:
             # First, cache the features without any gradient tracking.
             with torch.no_grad():
                 with autocast():
-                    output = model(**batch)
+                    output = model(**batch, output_dict=True)
                     assert isinstance(output, dict)
                     chunk_image_features = output["image_features"]
                     chunk_text_features = output["text_features"]
@@ -199,19 +212,16 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args
                 images = accum_images[j]
                 texts = accum_texts[j]
                 with autocast():
-                    output = model(image=images, text=texts)
-                    chunk_image_features, chunk_text_features, logit_scale = output['image_features'], \
-                                                                             output['text_features'], \
-                                                                             output['logit_scale']
-                    image_features = torch.cat(
-                        accum_image_features[:j] + [chunk_image_features] + accum_image_features[j + 1:])
-                    text_features = torch.cat(
-                        accum_text_features[:j] + [chunk_text_features] + accum_text_features[j + 1:])
-                    total_loss = loss(
-                        image_features=image_features,
-                        text_features=text_features,
-                        logit_scale=logit_scale,
-                    )
+                    model_out = model(image=images, text=texts, output_dict=True)
+                    logit_scale = model_out.pop("logit_scale")
+                    inputs = {}
+                    for key, val in accum_features.items():
+                        accumulated = accum_features[key]
+                        inputs[key] = torch.cat(accumulated[:j] +  [model_out[key]] + accumulated[j + 1:])
+                    losses_dict = loss(**inputs, logit_scale=logit_scale, output_dict=True)
+                    del inputs
+                    total_loss = sum(losses_dict.values())
+                    losses_dict["loss"] = total_loss
                 backward(total_loss, scaler)
 
         if scaler is not None:
@@ -235,7 +245,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args
 
         # reset gradient accum, if enabled
         if args.accum_freq > 1:
-            accum_images, accum_texts, accum_image_features, accum_text_features = [], [], [], []
+            accum_images, accum_texts, accum_features = [], [], {}
 
         # Note: we clamp to 4.6052 = ln(100), as in the original paper.
         with torch.no_grad():
@@ -255,6 +265,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args
                 if key not in losses_m:
                     losses_m[key] = AverageMeter()
                 losses_m[key].update(val.item(), batch_size)
+
             logit_scale = model_out['logit_scale']
             logit_scale_scalar = logit_scale.item()
             loss_log = " ".join(
@@ -263,10 +274,12 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args
                     for loss_name, loss_m in losses_m.items()
                 ]
             )
+            samples_per_second = args.accum_freq * args.batch_size * args.world_size / batch_time_m.val
+            samples_per_second_per_gpu = args.accum_freq * args.batch_size / batch_time_m.val
             logging.info(
                 f"Train Epoch: {epoch} [{num_samples:>{sample_digits}}/{samples_per_epoch} ({percent_complete:.0f}%)] "
                 f"Data (t): {data_time_m.avg:.3f} "
-                f"Batch (t): {batch_time_m.avg:.3f}, {args.accum_freq * args.batch_size * args.world_size / batch_time_m.val:#g}/s "
+                f"Batch (t): {batch_time_m.avg:.3f}, {samples_per_second:#g}/s, {samples_per_second_per_gpu:#g}/s/gpu "
                 f"LR: {optimizer.param_groups[0]['lr']:5f} "
                 f"Logit Scale: {logit_scale_scalar:.3f} " + loss_log
             )
@@ -275,7 +288,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, args
             log_data = {
                 "data_time": data_time_m.val,
                 "batch_time": batch_time_m.val,
-                "samples_per_second": args.accum_freq * args.batch_size * args.world_size / batch_time_m.val,
+                "samples_per_second": samples_per_second,
+                "samples_per_second_per_gpu": samples_per_second_per_gpu,
                 "scale": logit_scale_scalar,
                 "lr": optimizer.param_groups[0]["lr"]
             }
@@ -316,13 +330,14 @@ def evaluate(model, data, epoch, args, tb_writer=None):
         # FIXME this does not scale past small eval datasets
         # all_image_features @ all_text_features will blow up memory and compute very quickly
         cumulative_loss = 0.0
+        cumulative_gen_loss = 0.0
         all_image_features, all_text_features = [], []
         with torch.no_grad():
             for i, batch in enumerate(dataloader):
                 batch = Batch(**batch).to(device=device, non_blocking=True, dtypes={'image': cast_dtype})
 
                 with autocast():
-                    output = model(**batch)
+                    output = model(**batch, output_dict=True)
                     # features are accumulated in CPU tensors, otherwise GPU memory exhausted quickly
                     # however, system RAM is easily exceeded and compute time becomes problematic
                     image_features, text_features, logit_scale = output['image_features'], \
@@ -341,22 +356,32 @@ def evaluate(model, data, epoch, args, tb_writer=None):
                         F.cross_entropy(logits_per_text, labels)
                     ) / 2
 
+                    gen_loss = maybe_compute_generative_loss(output)
+
                 cumulative_loss += total_loss * batch_size
                 num_samples += batch_size
                 if is_master(args) and (i % 100) == 0:
                     logging.info(
                         f"Eval Epoch: {epoch} [{num_samples} / {samples_per_val}]\t"
-                        f"Loss: {cumulative_loss / num_samples:.6f}\t")
+                        f"Clip Loss: {cumulative_loss / num_samples:.6f}\t")
 
-            val_metrics = get_metrics(
+                    if gen_loss is not None:
+                        cumulative_gen_loss += gen_loss * batch_size
+                        logging.info(
+                            f"Generative Loss: {cumulative_gen_loss / num_samples:.6f}\t")
+
+            val_metrics = get_clip_metrics(
                 image_features=torch.cat(all_image_features),
                 text_features=torch.cat(all_text_features),
                 logit_scale=logit_scale.cpu(),
             )
             loss = cumulative_loss / num_samples
             metrics.update(
-                {**val_metrics, "val_loss": loss.item(), "epoch": epoch, "num_samples": num_samples}
+                {**val_metrics, "clip_val_loss": loss.item(), "epoch": epoch, "num_samples": num_samples}
             )
+            if gen_loss is not None:
+                gen_loss = cumulative_gen_loss / num_samples
+                metrics.update({"val_generative_loss": gen_loss.item()})
 
     if not metrics:
         return metrics
@@ -383,7 +408,7 @@ def evaluate(model, data, epoch, args, tb_writer=None):
     return metrics
 
 
-def get_metrics(image_features, text_features, logit_scale):
+def get_clip_metrics(image_features, text_features, logit_scale):
     metrics = {}
     logits_per_image = (logit_scale * image_features @ text_features.t()).detach().cpu()
     logits_per_text = logits_per_image.t().detach().cpu()
@@ -401,3 +426,10 @@ def get_metrics(image_features, text_features, logit_scale):
             metrics[f"{name}_R@{k}"] = np.mean(preds < k)
 
     return metrics
+
+
+def maybe_compute_generative_loss(model_out):
+    if "logits" in model_out and "labels" in model_out:
+        token_logits = model_out["logits"]
+        token_labels = model_out["labels"]
+        return F.cross_entropy(token_logits.permute(0, 2, 1), token_labels)

@@ -12,14 +12,12 @@ def get_flava_collate(hf_tokenizer, mlm_prob=0.15, itm_prob=0.1):
         mlm=True,
         mlm_probability=mlm_prob,
     )
-    pad_token_id = tokenizer.pad_token_id
 
     def collate(example_list):
         image_list, text_list = [], []
         for example in example_list:
             image_list.append(example["image"])
             text_list.append(example["text"])
-
         image = torch.stack(image_list)
         text = torch.stack(text_list)
         batch = {
@@ -28,17 +26,19 @@ def get_flava_collate(hf_tokenizer, mlm_prob=0.15, itm_prob=0.1):
         }
 
         # ITM
-        bs = len(image)
-        itm_labels = torch.bernoulli(torch.ones(bs) * (1 - itm_prob))
+        bs = image.shape[0]
+        itm_labels = torch.bernoulli(torch.ones(bs, dtype=image.dtype) * (1 - itm_prob))
+        itm_idx_mask = itm_labels.byte()
         batch_idx = torch.arange(bs)
-        negative_text_idx = torch.where(itm_labels == 1, batch_idx, (batch_idx + 1) % bs)
+        neg_batch_idx = (batch_idx + 1) % bs
+        negative_text_idx = itm_idx_mask * batch_idx + (1 - itm_idx_mask) * neg_batch_idx
         batch.update({
             "itm_neg_text_idx": negative_text_idx,
             "itm_labels": itm_labels,
         })
 
         # MLM
-        mlm_input = mlm_collator(text_list)
+        mlm_input = mlm_collator(text_list)  # TODO: add special_tokens_mask (improves efficiency)
         batch.update({
             "text_masked": mlm_input["input_ids"],
             "mlm_labels": mlm_input["labels"],
@@ -57,7 +57,6 @@ def get_mlm_collate(hf_tokenizer, mlm_prob=0.15):
         mlm=True,
         mlm_probability=mlm_prob,
     )
-    pad_token_id = tokenizer.pad_token_id
 
     def collate(example_list):
         mlm_input = mlm_collator([example["text"] for example in example_list])
@@ -67,8 +66,3 @@ def get_mlm_collate(hf_tokenizer, mlm_prob=0.15):
         }
 
     return collate
-
-
-def flava_imagenet_collate(example_list):
-    image_list, _ = zip(*example_list)
-    return {"image": torch.stack(image_list)}

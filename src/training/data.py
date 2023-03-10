@@ -6,6 +6,7 @@ import os
 import random
 import sys
 import time
+import braceexpand
 from dataclasses import dataclass
 from multiprocessing import Value
 
@@ -20,7 +21,8 @@ from torch.utils.data.distributed import DistributedSampler
 from webdataset.filters import _shuffle
 from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
 
-from open_clip.flava_data import flava_imagenet_collate, get_mlm_collate
+from open_clip.factory import get_tokenizer
+from open_clip.flava_data import get_mlm_collate
 
 try:
     import horovod.torch as hvd
@@ -37,19 +39,41 @@ class HFTextDataset(Dataset):
 
         logging.debug(f'Loading HuggingFace dataset from {name}.')
         self.df = load_dataset(name, split=split)
+        self.size = len(self.df)
         self.text_key = text_key
         logging.debug('Done loading data.')
 
         self.tokenize = tokenizer
 
     def __len__(self):
-        return len(self.df)
+        return self.size
 
     def __getitem__(self, idx):
         text = self.tokenize([str(self.df[idx][self.text_key])])[0]
-        return {
-            'text': text,
-         }
+        return {'text': text}
+
+
+class HFImageDataset(Dataset):
+    def __init__(self, name, split, transforms, image_key):
+        try:
+            from datasets import load_dataset
+        except ImportError:
+            raise ImportError('Please install datasets with `pip install datasets`.')
+
+        logging.debug(f'Loading HuggingFace dataset from {name}.')
+        self.df = load_dataset(name, split=split)
+        self.size = len(self.df)
+        self.image_key = image_key
+        logging.debug('Done loading data.')
+
+        self.transforms = transforms
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, idx):
+        image = self.transforms(self.df[idx][self.image_key])
+        return {'image': image}
 
 
 class CsvDataset(Dataset):
@@ -100,8 +124,29 @@ class DataInfo:
             self.sampler.set_epoch(epoch)
 
 
+def expand_urls(urls, weights=None):
+    if weights is None:
+        expanded_urls = wds.shardlists.expand_urls(urls)
+        return expanded_urls, None
+    if isinstance(urls, str):
+        urllist = urls.split("::")
+        weights = weights.split('::')
+        assert len(weights) == len(urllist), f"Expected the number of data components ({len(urllist)}) and weights({len(weights)}) to match."
+        weights = [float(weight) for weight in weights]
+        all_urls, all_weights = [], []
+        for url, weight in zip(urllist, weights):
+            expanded_url = list(braceexpand.braceexpand(url))
+            expanded_weights = [weight for _ in expanded_url]
+            all_urls.extend(expanded_url)
+            all_weights.extend(expanded_weights)
+        return all_urls, all_weights
+    else:
+        all_urls = list(urls)
+        return all_urls, weights
+
+
 def get_dataset_size(shards):
-    shards_list = wds.shardlists.expand_urls(shards)
+    shards_list, _ = expand_urls(shards)
     dir_path = os.path.dirname(shards_list[0])
     sizes_filename = os.path.join(dir_path, 'sizes.json')
     len_filename = os.path.join(dir_path, '__len__')
@@ -311,6 +356,7 @@ class ResampledShards2(IterableDataset):
     def __init__(
         self,
         urls,
+        weights=None,
         nshards=sys.maxsize,
         worker_seed=None,
         deterministic=False,
@@ -321,8 +367,11 @@ class ResampledShards2(IterableDataset):
         :param urls: a list of URLs as a Python list or brace notation string
         """
         super().__init__()
-        urls = wds.shardlists.expand_urls(urls)
+        urls, weights = expand_urls(urls, weights)
         self.urls = urls
+        self.weights = weights
+        if self.weights is not None:
+            assert len(self.urls) == len(self.weights), f"Number of urls {len(self.urls)} and weights {len(self.weights)} should match."
         assert isinstance(self.urls[0], str)
         self.nshards = nshards
         self.rng = random.Random()
@@ -348,7 +397,10 @@ class ResampledShards2(IterableDataset):
                 seed = self.worker_seed() + epoch
             self.rng.seed(seed)
         for _ in range(self.nshards):
-            yield dict(url=self.rng.choice(self.urls))
+            if self.weights is None:
+                yield dict(url=self.rng.choice(self.urls))
+            else:
+                yield dict(url=self.rng.choices(self.urls, weights=self.weights, k=1)[0])
 
 
 def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokenizer=None, collate_fn=None):
@@ -370,8 +422,9 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
     shared_epoch = SharedEpoch(epoch=epoch)  # create a shared epoch store to sync epoch to dataloader worker proc
 
     if resampled:
-        pipeline = [ResampledShards2(input_shards, deterministic=True, epoch=shared_epoch)]
+        pipeline = [ResampledShards2(input_shards, weights=args.train_data_upsampling_factors, deterministic=True, epoch=shared_epoch)]
     else:
+        assert args.train_data_upsampling_factors is None, "--train_data_upsampling_factors is only supported when sampling with replacement (together with --dataset-resampled)."
         pipeline = [wds.SimpleShardList(input_shards)]
 
     # at this point we have an iterator over all the shards
@@ -415,6 +468,7 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
     ])
 
     dataset = wds.DataPipeline(*pipeline)
+
     if is_train:
         if not resampled:
             assert num_shards >= args.workers * args.world_size, 'number of shards must be >= total workers'
@@ -482,6 +536,56 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None, coll
         shuffle=shuffle,
         num_workers=args.workers,
         pin_memory=True,
+        sampler=sampler,
+        collate_fn=collate_fn,
+        drop_last=is_train,
+    )
+    dataloader.num_samples = num_samples
+    dataloader.num_batches = len(dataloader)
+
+    return DataInfo(dataloader, sampler)
+
+
+def get_hf_text_dataset(args, split, text_key="text", epoch=0, tokenizer=None, collate_fn=None):
+    dataset_name = args.flava_unimodal_mlm
+    assert dataset_name
+    is_train = (split == "train")
+
+    dataset = HFTextDataset(dataset_name, split=split, text_key=text_key, tokenizer=tokenizer)
+    num_samples = len(dataset)
+    sampler = DistributedSampler(dataset) if args.distributed else None
+    shuffle = sampler is None
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.flava_unimodal_mlm_batch_size,
+        shuffle=shuffle,
+        num_workers=args.workers,
+        sampler=sampler,
+        collate_fn=collate_fn,
+        drop_last=is_train,
+    )
+    dataloader.num_samples = num_samples
+    dataloader.num_batches = len(dataloader)
+
+    return DataInfo(dataloader, sampler)
+
+
+def get_hf_image_dataset(args, split, image_key="image", epoch=0, transforms=None, collate_fn=None):
+    dataset_name = args.flava_unimodal_mae
+    assert dataset_name
+    is_train = (split == "train")
+
+    dataset = HFImageDataset(dataset_name, split=split, transforms=transforms, image_key=image_key)
+    num_samples = len(dataset)
+    sampler = DistributedSampler(dataset) if args.distributed else None
+    shuffle = sampler is None
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.flava_unimodal_mae_batch_size,
+        shuffle=shuffle,
+        num_workers=args.workers,
         sampler=sampler,
         collate_fn=collate_fn,
         drop_last=is_train,
@@ -607,21 +711,22 @@ def get_data(args, preprocess_fns, epoch=0, tokenizer=None, collate_fn=None):
     # FLAVA unimodal data sources
     is_flava = args.model.startswith('flava')
     if is_flava and args.flava_unimodal_mlm:
+        unimodal_tokenizer = get_tokenizer(args.model, unimodal=True)
         data["flava-mlm"] = get_hf_text_dataset(
             args,
+            "train",
             epoch=epoch,
-            tokenizer=tokenizer,
-            collate_fn=get_mlm_collate(tokenizer, args.flava_mlm_prob),
+            tokenizer=unimodal_tokenizer,
+            collate_fn=get_mlm_collate(unimodal_tokenizer, args.flava_mlm_prob),
         )
 
     if is_flava and args.flava_unimodal_mae:
-        # TODO: make this configurable to arbitrary ImageNet path
-        data["flava-mae"] = get_imagenet(
+        data["flava-mae"] = get_hf_image_dataset(
             args,
-            preprocess_fns,
-            "val",
-            flava_unimodal=True,
-            collate_fn=flava_imagenet_collate,
+            "train",
+            epoch=epoch,
+            transforms=preprocess_train,
+            collate_fn=None,
         )
 
     return data

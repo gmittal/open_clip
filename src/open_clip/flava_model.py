@@ -187,13 +187,15 @@ class FLAVAVisionCfg:
 
 @dataclass
 class FLAVATextCfg:
-    context_length: int = 128
+    context_length: int = 77
+    unimodal_context_length: int = 512
     hf_model_name: str = None
     hf_tokenizer_name: str = None
     hf_model_pretrained: bool = True
     hf_model_config: dict = None
     proj: str = None
     pooler_type: str = 'identity_pooler'
+    output_tokens: bool = False
 
 
 @dataclass
@@ -203,6 +205,10 @@ class FLAVAMultimodalCfg:
     layers: int = 12
     mlp_ratio: float = 4.0
     ls_init_value: Optional[float] = None  # layer scale initial value
+
+    # Product-of-Experts
+    poe_mlm: bool = False
+    poe_mae: bool = False
 
 
 def _build_vision_tower(
@@ -329,6 +335,8 @@ class FLAVA(nn.Module):
         )
         self.image_to_mm_projection = nn.Linear(embed_dim, multimodal_cfg.width)
         self.text_to_mm_projection = nn.Linear(embed_dim, multimodal_cfg.width)
+        self.poe_mlm = multimodal_cfg.poe_mlm
+        self.poe_mae = multimodal_cfg.poe_mae
 
         # Cross-modal MLM
         self.mm_mlm_head = nn.Sequential(
@@ -338,7 +346,6 @@ class FLAVA(nn.Module):
         )
 
         # Cross-modal MAE
-        self.mm_patch_mask_token = nn.Parameter(multimodal_cfg.width ** -0.5 * torch.randn(multimodal_cfg.width))
         self.mm_mae_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim * 2),
             nn.GELU(),
@@ -364,7 +371,6 @@ class FLAVA(nn.Module):
 
     def init_parameters(self):
         nn.init.normal_(self.patch_mask_token, std=0.02)
-        nn.init.normal_(self.mm_patch_mask_token, std=0.02)
 
     @torch.jit.ignore
     def set_grad_checkpointing(self, enable=True):
@@ -476,7 +482,6 @@ class FLAVA(nn.Module):
         # Multimodal inputs
         mm_h_image = self.image_to_mm_projection(h_image)
         mm_h_text = self.text_to_mm_projection(h_text)
-        mm_h_masked_image = self.image_to_mm_projection(h_masked_image)
         mm_h_masked_text = self.text_to_mm_projection(h_masked_text)
         mm_h_itm_text = self.text_to_mm_projection(h_text[itm_neg_text_idx])
 
@@ -493,23 +498,35 @@ class FLAVA(nn.Module):
         mm_mlm_logits = self.mm_mlm_head(self.mm_projection(mm_masked_text_pred[:, 1:, :]))  # remove cls token
 
         # Multimodal cross-attention MAE task (masked images, full text)
-        mm_mae_mask_tokens = self.mm_patch_mask_token.repeat(
-            mm_h_masked_image.shape[0],
-            ids_restore.shape[1] + 1 - mm_h_masked_image.shape[1],
+        mae_mask_tokens = self.patch_mask_token.repeat(
+            h_masked_image.shape[0],
+            ids_restore.shape[1] + 1 - h_masked_image.shape[1],
             1,
         )
-        mm_image_with_mask_tokens = torch.cat([mm_h_masked_image[:, 1:, :], mm_mae_mask_tokens], dim=1)  # no cls token
-        mm_image_with_mask_tokens = torch.gather(
-            mm_image_with_mask_tokens,
+        image_with_mask_tokens = torch.cat([h_masked_image[:, 1:, :], mae_mask_tokens], dim=1)  # no cls token
+        image_with_mask_tokens = torch.gather(
+            image_with_mask_tokens,
             dim=1,
-            index=ids_restore.unsqueeze(-1).repeat(1, 1, mm_h_masked_image.shape[2]),
+            index=ids_restore.unsqueeze(-1).repeat(1, 1, h_masked_image.shape[2]),
         )  # unshuffle
-        mm_image_with_mask_tokens = torch.cat([mm_h_masked_image[:, :1, :], mm_image_with_mask_tokens], dim=1)  # append cls token
+        image_with_mask_tokens = torch.cat([h_masked_image[:, :1, :], image_with_mask_tokens], dim=1)  # append cls token
 
+        mm_image_with_mask_tokens = self.image_to_mm_projection(image_with_mask_tokens)
         mm_mae_input = torch.cat([mm_image_with_mask_tokens, mm_h_text], dim=1)
         h_m_mae = self.multimodal(mm_mae_input, attn_mask=mm_attn_mask)
         mm_masked_patches_pred = h_m_mae[:, 1:mm_image_with_mask_tokens.shape[1] + 1, :]
         mm_mae_logits = self.mm_mae_head(self.mm_projection(mm_masked_patches_pred[:, 1:, :]))  # remove cls token
+
+        # Product-of-Experts (Hinton '02)
+        # https://aclanthology.org/2021.acl-long.522.pdf)
+        if self.poe_mlm:
+            uni_mlm_logits = self.mlm_head(self.text_projection(h_masked_text[:, 1:, :]))
+            assert uni_mlm_logits.shape == mm_mlm_logits.shape
+            mm_mlm_logits = mm_mlm_logits + uni_mlm_logits
+        if self.poe_mae:
+            uni_mae_logits = self.mae_decoder(self.image_projection(image_with_mask_tokens))
+            assert uni_mae_logits.shape == mm_mae_logits.shape
+            mm_mae_logits = mm_mae_logits + uni_mae_logits
 
         return {
             # contrastive outputs
@@ -544,6 +561,8 @@ class FLAVA(nn.Module):
         # unimodal flags
         unimodal_mae=False,
         unimodal_mlm=False,
+
+        output_dict=True,
     ):
         if unimodal_mlm:
             assert text_masked is not None and mlm_labels is not None

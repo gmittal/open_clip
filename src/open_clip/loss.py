@@ -5,6 +5,7 @@ from torch.nn import functional as F
 try:
     import torch.distributed.nn
     from torch import distributed as dist
+
     has_distributed = True
 except ImportError:
     has_distributed = False
@@ -85,8 +86,20 @@ class ClipLoss(nn.Module):
         self.prev_num_logits = 0
         self.labels = {}
 
-    def forward(self, image_features, text_features, logit_scale):
-        device = image_features.device
+    def get_ground_truth(self, device, num_logits) -> torch.Tensor:
+        # calculated ground-truth and cache if enabled
+        if self.prev_num_logits != num_logits or device not in self.labels:
+            labels = torch.arange(num_logits, device=device, dtype=torch.long)
+            if self.world_size > 1 and self.local_loss:
+                labels = labels + num_logits * self.rank
+            if self.cache_labels:
+                self.labels[device] = labels
+                self.prev_num_logits = num_logits
+        else:
+            labels = self.labels[device]
+        return labels
+
+    def get_logits(self, image_features, text_features, logit_scale):
         if self.world_size > 1:
             all_image_features, all_text_features = gather_features(
                 image_features, text_features,
@@ -102,23 +115,246 @@ class ClipLoss(nn.Module):
             logits_per_image = logit_scale * image_features @ text_features.T
             logits_per_text = logit_scale * text_features @ image_features.T
 
-        # calculated ground-truth and cache if enabled
-        num_logits = logits_per_image.shape[0]
-        if self.prev_num_logits != num_logits or device not in self.labels:
-            labels = torch.arange(num_logits, device=device, dtype=torch.long)
-            if self.world_size > 1 and self.local_loss:
-                labels = labels + num_logits * self.rank
-            if self.cache_labels:
-                self.labels[device] = labels
-                self.prev_num_logits = num_logits
-        else:
-            labels = self.labels[device]
+        return logits_per_image, logits_per_text
+
+    def forward(self, image_features, text_features, logit_scale, output_dict=False):
+        device = image_features.device
+        logits_per_image, logits_per_text = self.get_logits(image_features, text_features, logit_scale)
+
+        labels = self.get_ground_truth(device, logits_per_image.shape[0])
 
         total_loss = (
             F.cross_entropy(logits_per_image, labels) +
             F.cross_entropy(logits_per_text, labels)
-            ) / 2
-        return total_loss
+        ) / 2
+
+        return {"contrastive_loss": total_loss} if output_dict else total_loss
+
+
+class CoCaLoss(ClipLoss):
+    def __init__(
+            self,
+            caption_loss_weight,
+            clip_loss_weight,
+            pad_id=0,  # pad_token for open_clip custom tokenizer
+            local_loss=False,
+            gather_with_grad=False,
+            cache_labels=False,
+            rank=0,
+            world_size=1,
+            use_horovod=False,
+    ):
+        super().__init__(
+            local_loss=local_loss,
+            gather_with_grad=gather_with_grad,
+            cache_labels=cache_labels,
+            rank=rank,
+            world_size=world_size,
+            use_horovod=use_horovod
+        )
+
+        self.clip_loss_weight = clip_loss_weight
+        self.caption_loss_weight = caption_loss_weight
+        self.caption_loss = nn.CrossEntropyLoss(ignore_index=pad_id)
+
+    def forward(self, image_features, text_features, logits, labels, logit_scale, output_dict=False):
+        clip_loss = super().forward(image_features, text_features, logit_scale)
+        clip_loss = self.clip_loss_weight * clip_loss
+
+        caption_loss = self.caption_loss(
+            logits.permute(0, 2, 1),
+            labels,
+        )
+        caption_loss = caption_loss * self.caption_loss_weight
+
+        if output_dict:
+            return {"contrastive_loss": clip_loss, "caption_loss": caption_loss}
+
+        return clip_loss, caption_loss
+
+
+class DistillClipLoss(ClipLoss):
+
+    def dist_loss(self, teacher_logits, student_logits):
+        return -(teacher_logits.softmax(dim=1) * student_logits.log_softmax(dim=1)).sum(dim=1).mean(dim=0)
+
+    def forward(
+            self,
+            image_features,
+            text_features,
+            logit_scale,
+            dist_image_features,
+            dist_text_features,
+            dist_logit_scale,
+            output_dict=False,
+    ):
+        logits_per_image, logits_per_text = \
+            self.get_logits(image_features, text_features, logit_scale)
+
+        dist_logits_per_image, dist_logits_per_text = \
+            self.get_logits(dist_image_features, dist_text_features, dist_logit_scale)
+
+        labels = self.get_ground_truth(image_features.device, logits_per_image.shape[0])
+
+        contrastive_loss = (
+            F.cross_entropy(logits_per_image, labels) +
+            F.cross_entropy(logits_per_text, labels)
+        ) / 2
+
+        distill_loss = (
+            self.dist_loss(dist_logits_per_image, logits_per_image) +
+            self.dist_loss(dist_logits_per_text, logits_per_text)
+        ) / 2
+
+        if output_dict:
+            return {"contrastive_loss": contrastive_loss, "distill_loss": distill_loss}
+
+        return contrastive_loss, distill_loss
+
+
+class MLMLoss(nn.Module):
+
+    def __init__(self, ignore_index=-100):
+        super().__init__()
+        self.ignore_index = ignore_index
+
+    def forward(self, logits, labels):
+        assert logits.shape[:2] == labels.shape[:2]
+        vocab_size = logits.shape[-1]
+        logits = logits.reshape(-1, vocab_size)
+        labels = labels.reshape(-1)
+
+        # only compute loss on masked logits
+        mask = (labels != self.ignore_index)
+        masked_logits = logits[mask]
+        masked_labels = labels[mask]
+        return F.cross_entropy(masked_logits, masked_labels, ignore_index=self.ignore_index)
+
+
+class ITMLoss(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, itm_logits, itm_labels):
+        itm_logits = itm_logits.view(-1)
+        itm_labels = itm_labels.view(-1)
+        return F.binary_cross_entropy_with_logits(itm_logits, itm_labels)
+
+
+class MAELoss(nn.Module):
+
+    def __init__(self, norm_pix_loss):
+        super().__init__()
+        self.norm_pix_loss = norm_pix_loss
+
+    def patchify(self, imgs, p):
+        """
+        imgs: (N, 3, H, W)
+        x: (N, L, patch_size**2 *3)
+        """
+        assert imgs.shape[2] == imgs.shape[3], 'image must be square'
+        assert imgs.shape[2] % p == 0, 'image size must be divisible by patch size'
+
+        h = w = imgs.shape[2] // p
+        x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
+        x = torch.einsum('nchpwq->nhwpqc', x)
+        x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
+        return x
+
+    def forward(self, imgs, pred, mask):
+        """
+        imgs: [N, 3, H, W]
+        pred: [N, L, p*p*3]
+        mask: [N, L], 0 is keep, 1 is remove,
+        """
+        patch_area = pred.shape[-1] / 3
+        patch_size = int(patch_area**0.5)
+        target = self.patchify(imgs, patch_size)
+        if self.norm_pix_loss:
+            mean = target.mean(dim=-1, keepdim=True)
+            var = target.var(dim=-1, keepdim=True)
+            target = (target - mean) / (var + 1.e-6)**.5
+
+        one_mask = (mask == 1)
+        loss = (pred[one_mask] - target[one_mask]) ** 2
+        loss = loss.mean()  # mean loss on removed patches
+        return loss
+
+
+class FlavaLoss(ClipLoss):
+
+    def __init__(
+        self,
+        contrastive_loss_weight,
+        itm_loss_weight,
+        mlm_loss_weight,
+        mae_loss_weight,
+        mae_norm_pix_loss,
+        *args,
+        **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.mlm_loss = MLMLoss()
+        self.mae_loss = MAELoss(mae_norm_pix_loss)
+        self.itm_loss = ITMLoss()
+
+        self.contrastive_loss_weight = contrastive_loss_weight
+        self.itm_loss_weight = itm_loss_weight
+        self.mlm_loss_weight = mlm_loss_weight
+        self.mae_loss_weight = mae_loss_weight
+
+    def forward_mlm(self, mlm_logits, mlm_labels):
+        return {
+            "mlm_loss": self.mlm_loss_weight * self.mlm_loss(mlm_logits, mlm_labels)
+        }
+
+    def forward_mae(self, image, mae_mask, mae_logits):
+        return {
+            "mae_loss": self.mae_loss_weight * self.mae_loss(image, mae_logits, mae_mask)
+        }
+
+    def forward(
+        self,
+        *,
+        # contrastive
+        image_features,
+        text_features,
+        logit_scale,
+
+        # mae
+        image,
+        mae_mask,
+        mm_mae_logits,
+
+        # mlm
+        mlm_labels,
+        mm_mlm_logits,
+
+        # itm
+        itm_logits,
+        itm_labels,
+
+        output_dict=False,
+    ):
+        clip_loss = super().forward(image_features, text_features, logit_scale)
+        itm_loss = self.itm_loss(itm_logits, itm_labels)
+        mm_mlm_loss = self.mlm_loss(mm_mlm_logits, mlm_labels)
+        mm_mae_loss = self.mae_loss(image, mm_mae_logits, mae_mask)
+
+        clip_loss = self.contrastive_loss_weight * clip_loss
+        itm_loss = self.itm_loss_weight * itm_loss
+        mm_mlm_loss = self.mlm_loss_weight * mm_mlm_loss
+        mm_mae_loss = self.mae_loss_weight * mm_mae_loss
+
+        if output_dict:
+            return {
+                "contrastive_loss": clip_loss,
+                "itm_loss": itm_loss,
+                "mlm_loss": mm_mlm_loss,
+                "mae_loss": mm_mae_loss,
+            }
+        return clip_loss, itm_loss, mm_mlm_loss, mm_mae_loss
 
 
 class MLMLoss(nn.Module):

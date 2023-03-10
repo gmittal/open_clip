@@ -1,6 +1,6 @@
 # OpenCLIP
 
-[[Paper]](https://arxiv.org/abs/2212.07143) [[Colab]](https://colab.research.google.com/github/mlfoundations/open_clip/blob/master/docs/Interacting_with_open_clip.ipynb)
+[[Paper]](https://arxiv.org/abs/2212.07143) [[Clip Colab]](https://colab.research.google.com/github/mlfoundations/open_clip/blob/master/docs/Interacting_with_open_clip.ipynb) [[Coca Colab]](https://colab.research.google.com/github/mlfoundations/open_clip/blob/master/docs/Interacting_with_open_coca.ipynb)
 [![pypi](https://img.shields.io/pypi/v/open_clip_torch.svg)](https://pypi.python.org/pypi/open_clip_torch)
 
 Welcome to an open source implementation of OpenAI's [CLIP](https://arxiv.org/abs/2103.00020) (Contrastive Language-Image Pre-training).
@@ -10,15 +10,35 @@ Specifically, a ResNet-50 model trained with our codebase on OpenAI's [15 millio
 
 We further this with a replication study on a dataset of comparable size to OpenAI's, [LAION-400M](https://arxiv.org/abs/2111.02114), and with the larger [LAION-2B](https://laion.ai/blog/laion-5b/) superset. In addition, we study scaling behavior in a paper on [reproducible scaling laws for contrastive language-image learning](https://arxiv.org/abs/2212.07143).
 
-We have trained:
-  * ViT-B/32 on LAION-400M with a accuracy of **62.9%**, comparable to OpenAI's **63.2%**, zero-shot top-1 on ImageNet1k
+We have trained the following ViT CLIP models:
+  * ViT-B/32 on LAION-400M with a accuracy of **62.9%**, comparable to OpenAI's **63.2%**, zero-shot top-1 on ImageNet-1k
   * ViT-B/32 on LAION-2B with a accuracy of **66.6%**.
   * ViT-B/16 on LAION-400M achieving an accuracy of **67.1%**, lower than OpenAI's **68.3%** (as measured here, 68.6% in paper)
   * ViT-B/16+ 240x240 (~50% more FLOPS than B/16 224x224) on LAION-400M achieving an accuracy of **69.2%**
+  * ViT-B/16 on LAION-2B with a accuracy of **70.2%**.
   * ViT-L/14 on LAION-400M with an accuracy of **72.77%**, vs OpenAI's **75.5%** (as measured here, 75.3% in paper)
   * ViT-L/14 on LAION-2B with an accuracy of **75.3%**, vs OpenAI's **75.5%** (as measured here, 75.3% in paper)
-  * ViT-H/14 on LAION-2B with an accuracy of **78.0**. The best in1k zero-shot for released, open-source weights thus far.
-  * ViT-g/14 on LAION-2B with an accuracy of **76.6**. This was trained on reduced schedule, same samples seen as 400M models.
+  * CoCa ViT-L/14 on LAION-2B with an accuracy of **75.5%** (currently only 13B samples seen) vs. CLIP ViT-L/14 73.1% (on the same dataset and samples seen)
+  * ViT-H/14 on LAION-2B with an accuracy of **78.0**. The second best in1k zero-shot for released, open-source weights thus far.
+  * ViT-g/14 on LAION-2B with an accuracy of **76.6**. This was trained on reduced 12B samples seen schedule, same samples seen as 400M models.
+  * ViT-g/14 on LAION-2B with an accuracy of **78.5**. Full 34B samples seen schedule.
+  * ViT-G/14 on LAION-2B with an accuracy of **80.1**. The best in1k zero-shot for released, open-source weights thus far.
+
+And the following ConvNeXt CLIP models:
+  * ConvNext-Base @ 224x224 on LAION-400M with an ImageNet-1k zero-shot top-1 of **66.3%**
+  * ConvNext-Base (W) @ 256x256 on LAION-2B with an ImageNet-1k zero-shot top-1 of **70.8%**
+  * ConvNext-Base (W) @ 256x256 /w augreg (extra augmentation + regularization) on LAION-2B with a top-1 of **71.5%**
+  * ConvNext-Base (W) @ 256x256 on LAION-A (900M sample aesthetic subset of 2B) with a top-1 of **71.0%**
+  * ConvNext-Base (W) @ 320x320 on LAION-A with a top-1 of **71.7%** (eval at 384x384 is **71.0**)
+  * ConvNext-Base (W) @ 320x320 /w augreg on LAION-A with a top-1 of **71.3%** (eval at 384x384 is **72.2%**)
+  * ConvNext-Large (D) @ 256x256 /w augreg on LAION-2B with a top-1 of **75.9%**
+  * ConvNext-Large (D) @ 320x320 fine-tune of 256x256 weights above for ~2.5B more samples on LAION-2B, top-1 of **76.6%**
+  * ConvNext-Large (D) @ 320x320 soup of 3 fine-tunes of 256x256 weights above on LAION-2B, top-1 of **76.9%**
+  * ConvNext-XXLarge @ 256x256 original run **79.1%** 
+  * ConvNext-XXLarge @ 256x256 rewind of last 10% **79.3%**
+  * ConvNext-XXLarge @ 256x256 soup of original + rewind **79.4%**
+
+Model cards w/ additional model specific details can be found on the Hugging Face Hub under the OpenCLIP library tag: https://huggingface.co/models?library=open_clip
 
 As we describe in more detail [below](#why-are-low-accuracy-clip-models-interesting), CLIP models in a medium accuracy regime already allow us to draw conclusions about the robustness of larger CLIP models since the models follow [reliable scaling laws](https://arxiv.org/abs/2107.04649).
 
@@ -59,6 +79,7 @@ with torch.no_grad(), torch.cuda.amp.autocast():
 
 print("Label probs:", text_probs)  # prints: [[1., 0., 0.]]
 ```
+See also this [[Clip Colab]](https://colab.research.google.com/github/mlfoundations/open_clip/blob/master/docs/Interacting_with_open_clip.ipynb)
 
 To compute billions of embeddings efficiently, you can use [clip-retrieval](https://github.com/rom1504/clip-retrieval) which has openclip support.
 
@@ -171,6 +192,20 @@ You can set this on your visual transformer config with the key `patch_dropout`.
 
 In the paper, they also finetuned without the patch dropout at the end. You can do this with the command-line argument `--force-patch-dropout 0.`
 
+#### Multiple data sources
+
+OpenCLIP supports using multiple data sources, by separating different data paths with `::`.
+For instance, to train on CC12M and on LAION, one might use `--train-data '/data/cc12m/cc12m-train-{0000..2175}.tar'::/data/LAION-400M/{00000..41455}.tar"`.
+Using `--dataset-resampled` is recommended for these cases.
+
+By default, on expectation the amount of times the model will see a sample from each source is proportional to the size of the source.
+For instance, when training on one data source with size 400M and one with size 10M, samples from the first source are 40x more likely to be seen in expectation.
+
+We also support different weighting of the data sources, by using the `--train-data-upsampling-factors` flag.
+For instance, using `--train-data-upsampling-factors=1::1` in the above scenario is equivalent to not using the flag, and `--train-data-upsampling-factors=1::2` is equivalent to upsampling the second data source twice.
+If you want to sample from data sources with the same frequency, the upsampling factors should be inversely proportional to the sizes of the data sources.
+For instance, if dataset `A` has 1000 samples and dataset `B` has 100 samples, you can use `--train-data-upsampling-factors=0.001::0.01` (or analogously, `--train-data-upsampling-factors=1::10`).
+
 #### Single-Node
 
 We make use of `torchrun` to launch distributed jobs. The following launches a
@@ -257,6 +292,93 @@ python -m training.main \
     --resume /path/to/checkpoints/epoch_K.pt
 ```
 
+### Training CoCa:
+Training [CoCa](https://arxiv.org/abs/2205.01917) models is enabled through specifying a CoCa config using the ```--model``` parameter of the training script. Currently available configs are "coca_base", "coca_ViT-B-32", and "coca_roberta-ViT-B-32" (which uses RoBERTa as the text encoder). CoCa configs are different from CLIP configs because they have an additional "multimodal_cfg" component which specifies parameters for the multimodal text decoder. Here's an example from the coca_ViT-B-32 config:
+```json
+"multimodal_cfg": {
+	"context_length": 76,
+	"vocab_size": 49408,
+	"width": 512,
+	"heads": 8,
+	"layers": 12,
+	"latent_dim": 512,
+	"attn_pooler_heads": 8
+}
+```
+Credit to [lucidrains](https://github.com/lucidrains) for [initial code](https://github.com/lucidrains/CoCa-pytorch), [gpucce](https://github.com/gpucce) for adapting the code to open_clip, and [iejMac](https://github.com/iejMac) for training the models.
+
+### Generating text with CoCa
+
+```python
+import open_clip
+import torch
+from PIL import Image
+
+model, _, transform = open_clip.create_model_and_transforms(
+  model_name="coca_ViT-L-14",
+  pretrained="mscoco_finetuned_laion2B-s13B-b90k"
+)
+
+im = Image.open("cat.jpg").convert("RGB")
+im = transform(im).unsqueeze(0)
+
+with torch.no_grad(), torch.cuda.amp.autocast():
+  generated = model.generate(im)
+
+print(open_clip.decode(generated[0]).split("<end_of_text>")[0].replace("<start_of_text>", ""))
+```
+
+See also this [[Coca Colab]](https://colab.research.google.com/github/mlfoundations/open_clip/blob/master/docs/Interacting_with_open_coca.ipynb)
+
+### Fine Tuning CoCa
+
+To fine-tune coca on mscoco, first create the dataset, one way is using a csvdataset and perhaps the simplest way to do it is using [CLIP_benchmark](https://github.com/LAION-AI/CLIP_benchmark) which in turn uses [pycocotools](https://github.com/cocodataset/cocoapi) (that can be used also by itself).
+
+```python
+from clip_benchmark.datasets.builder import build_dataset
+import pandas as pd
+import os
+
+root_path = "path/to/data/dir" # set this to smth meaningful
+ds = build_dataset("mscoco_captions", root=root_path, split="train") # this downloads the dataset if it is not there already
+coco = ds.coco
+imgs = coco.loadImgs(coco.getImgIds())
+future_df = {"filepath":[], "title":[]}
+for img in imgs:
+    caps = coco.imgToAnns[img["id"]]
+    for cap in caps:
+        future_df["filepath"].append(img["file_name"])
+        future_df["title"].append(cap["caption"])
+pd.DataFrame.from_dict(future_df).to_csv(
+  os.path.join(root_path, "train2014.csv"), index=False, sep="\t"
+)
+```
+This should create a csv dataset that one can use to fine-tune coca with open_clip
+```bash
+python -m training.main \
+    --dataset-type "csv" \
+    --train-data "path/to/data/dir/train2014.csv" \
+    --warmup 1000 \
+    --batch-size 128 \
+    --lr 1e-5 \
+    --wd 0.1 \
+    --epochs 1 \
+    --workers 3 \
+    --model "coca_ViT-L-14" \
+    --report-to "wandb" \
+    --coca-contrastive-loss-weight 0 \
+    --coca-caption-loss-weight 1 \
+    --log-every-n-steps 100
+```
+
+This is a general setting, open_clip has very parameters that can be set, ```python -m training.main --help``` should show them. The only relevant change compared to pre-training are the two arguments
+
+```bash
+--coca-contrastive-loss-weight 0
+--coca-caption-loss-weight 1
+```
+which make the model only train the generative side.
+
 ### Training with pre-trained language models as text encoder:
 
 If you wish to use different language models as the text encoder for CLIP you can do so by using one of the Hugging Face model configs in ```src/open_clip/model_configs``` and passing in it's tokenizer as the ```--model``` and ```--hf-tokenizer-name``` parameters respectively. Currently we only support RoBERTa ("test-roberta" config), however adding new models should be trivial. You can also determine how many layers, from the end, to leave unfrozen with the ```--lock-text-unlocked-layers``` parameter. Here's an example command to train CLIP with the RoBERTa LM that has it's last 10 layers unfrozen:
@@ -298,6 +420,8 @@ tensorboard --logdir=logs/tensorboard/ --port=7777
 ```
 
 ## Evaluation / Zero-Shot
+
+We recommend https://github.com/LAION-AI/CLIP_benchmark#how-to-use for systematic evaluation on 40 datasets.
 
 ### Evaluating local checkpoint:
 
@@ -481,12 +605,22 @@ Future trained models will use nn.GELU.
  ('ViT-L-14-336', 'openai'),
  ('ViT-H-14', 'laion2b_s32b_b79k'),
  ('ViT-g-14', 'laion2b_s12b_b42k'),
+ ('ViT-bigG-14', 'laion2b_s39b_b160k'),
  ('roberta-ViT-B-32', 'laion2b_s12b_b32k'),
  ('xlm-roberta-base-ViT-B-32', 'laion5b_s13b_b90k'),
- ('xlm-roberta-large-ViT-H-14', 'frozen_laion5b_s13b_b90k'),]
+ ('xlm-roberta-large-ViT-H-14', 'frozen_laion5b_s13b_b90k'),
+ ('coca_ViT-B-32', 'laion2B-s13B-b90k'),
+ ('coca_ViT-B-32', 'mscoco_finetuned_laion2B-s13B-b90k'), # finetuned models lose contrastive capabilities
+ ('coca_ViT-L-14', 'laion2B-s13B-b90k'),
+ ('coca_ViT-L-14', 'mscoco_finetuned_laion2B-s13B-b90k'),] # finetuned models lose contrastive capabilities
 
 >>> model, train_transform, eval_transform = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
 ```
+### Model distillation
+
+You can distill from a pre-trained by using `--distill-model` and `--distill-pretrained` to specify the model you'd like to distill from.
+For instance, to distill from OpenAI ViT-L/14 use `--distill-model ViT-L-14 --distill-pretrained openai`.
+
 ### Gradient accumulation
 
 To simulate larger batches use `--accum-freq k`. If per gpu batch size, `--batch-size`, is `m`, then the effective batch size will be `k * m * num_gpus`.
@@ -499,7 +633,31 @@ There is some additional GPU memory required --- the features and data from all 
 
 There are also `m` loss computations instead of the usual 1.
 
-For more information see Cui et al. (https://arxiv.org/abs/2112.09331) or Pham et al. (https://arxiv.org/abs/2111.10050). 
+For more information see Cui et al. (https://arxiv.org/abs/2112.09331) or Pham et al. (https://arxiv.org/abs/2111.10050).
+
+### Support for remote loading/training
+
+It is always possible to resume directly from a remote file, e.g., a file in an s3 bucket. Just set `--resume s3://<path-to-checkpoint> `.
+This will work with any filesystem supported by `fsspec`.
+
+It is also possible to train `open_clip` models while continuously backing up to s3. This can help to avoid slow local file systems.
+
+Say that your node has a local ssd `/scratch`, an s3 bucket `s3://<path-to-bucket>`.
+
+In that case, set `--logs /scratch` and `--remote-sync s3://<path-to-bucket>`. Then, a background process will sync `/scratch/<run-name>` to `s3://<path-to-bucket>/<run-name>`. After syncing, the background process will sleep for `--remote-sync-frequency` seconds, which defaults to 5 minutes.
+
+There is also experimental support for syncing to other remote file systems, not just s3. To do so, specify `--remote-sync-protocol fsspec`. However, this is currently very slow and not recommended.
+
+Also, to optionally avoid saving too many checkpoints locally when using these features, you can use `--delete-previous-checkpoint` which deletes the previous checkpoint after saving a new one.
+
+Note: if you are using this feature with `--resume latest`, there are a few warnings. First, use with `--save-most-recent` is not supported. Second, only `s3` is supported. Finally, since the sync happens in the background, it is possible that the most recent checkpoint may not be finished syncing to the remote.
+
+### Pushing Models to Hugging Face Hub
+
+The module `open_clip.push_to_hf_hub` includes helpers for pushing models /w weights and config to the HF Hub.
+
+The tool can be run from command line, ex:
+`pytorch -m open_clip.push_to_hf_hub --model convnext_large_d_320 --pretrained /train/checkpoints/epoch_12.pt --repo-id laion/CLIP-convnext_large_d_320.laion2B-s29B-b131K-ft`
 
 ## Scaling trends
 
@@ -585,6 +743,31 @@ If you found this repository useful, please consider citing:
   author={Alec Radford and Jong Wook Kim and Chris Hallacy and A. Ramesh and Gabriel Goh and Sandhini Agarwal and Girish Sastry and Amanda Askell and Pamela Mishkin and Jack Clark and Gretchen Krueger and Ilya Sutskever},
   booktitle={ICML},
   year={2021}
+}
+```
+
+```bibtex
+@inproceedings{schuhmann2022laionb,
+  title={{LAION}-5B: An open large-scale dataset for training next generation image-text models},
+  author={Christoph Schuhmann and
+          Romain Beaumont and
+          Richard Vencu and
+          Cade W Gordon and
+          Ross Wightman and
+          Mehdi Cherti and
+          Theo Coombes and
+          Aarush Katta and
+          Clayton Mullis and
+          Mitchell Wortsman and
+          Patrick Schramowski and
+          Srivatsa R Kundurthy and
+          Katherine Crowson and
+          Ludwig Schmidt and
+          Robert Kaczmarczyk and
+          Jenia Jitsev},
+  booktitle={Thirty-sixth Conference on Neural Information Processing Systems Datasets and Benchmarks Track},
+  year={2022},
+  url={https://openreview.net/forum?id=M3Y74vmsMcY}
 }
 ```
 
