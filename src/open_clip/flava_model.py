@@ -195,6 +195,7 @@ class FLAVATextCfg:
     hf_model_config: dict = None
     proj: str = None
     pooler_type: str = 'identity_pooler'
+    output_tokens: bool = False
 
 
 @dataclass
