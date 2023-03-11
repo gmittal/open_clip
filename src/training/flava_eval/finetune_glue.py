@@ -202,7 +202,7 @@ def get_task_metric(task_name):
 def get_task_dataloaders(args):
     tokenizer = get_tokenizer(args.model)
     task_name = args.task_name
-    roberta_tokenizer = isinstance(tokenizer.tokenizer, transformers.models.roberta.tokenization_roberta.RobertaTokenizer) or isinstance(tokenizer, transformers.models.roberta.tokenization_roberta_fast.RobertaTokenizerFast)
+    roberta_tokenizer = isinstance(tokenizer, transformers.models.roberta.tokenization_roberta.RobertaTokenizer) or isinstance(tokenizer, transformers.models.roberta.tokenization_roberta_fast.RobertaTokenizerFast)
     separator_token = '</s>' if roberta_tokenizer else '<end_of_text>'
 
     dataloaders = {}
