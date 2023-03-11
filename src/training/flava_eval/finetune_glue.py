@@ -148,7 +148,7 @@ class GLUEDataset(Dataset):
         self.dataset = load_dataset("glue", task, split=split)
         self.label_key = label_key
         self.text_key = text_key # list of strings
-        assert len(self.text_key) <= 2 and isinstance(self.text_key, list)
+        assert len(self.text_key) <= 2
         self.length = len(self.dataset)
         self.tokenize = tokenizer
         self.task = task
@@ -204,10 +204,10 @@ def get_task_dataloaders(args):
     task_name = args.task_name
     roberta_tokenizer = isinstance(tokenizer, transformers.models.roberta.tokenization_roberta.RobertaTokenizer) or isinstance(tokenizer, transformers.models.roberta.tokenization_roberta_fast.RobertaTokenizerFast)
     separator_token = '</s>' if roberta_tokenizer else '<end_of_text>'
-    is_train = (split_name == "train")
 
     dataloaders = {}
     for split_name in ["train", args.validation_key, args.test_key]:
+        is_train = (split_name == "train")
         dataset = GLUEDataset(
             task_name,
             split_name,
@@ -219,7 +219,7 @@ def get_task_dataloaders(args):
         dataloader = DataLoader(
             dataset,
             batch_size=args.batch_size,
-            shuffle=True,
+            shuffle=is_train,
             num_workers=args.workers,
             pin_memory=False,
             drop_last=is_train,
@@ -249,7 +249,7 @@ def compute_metrics(model, dataloader, device, args):
             if args.task_name == "stsb":
                 logits = logits.view(-1)
                 label = label.view(-1).float()
-            predictions = torch.argmax(logits, dim=-1).float() if args.task_name == "stsb" else logits
+            predictions = torch.argmax(logits, dim=-1).float() if args.task_name != "stsb" else logits
             batch_val_loss = get_loss_fn(args.task_name)(logits, label, reduction='sum')
         val_loss += batch_val_loss.item()
         metric.add_batch(
