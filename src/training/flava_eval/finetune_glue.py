@@ -1,11 +1,8 @@
-import pdb
 import argparse
-import os
 import sys
 from collections import defaultdict
 
 import torch
-from PIL import Image
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -13,7 +10,7 @@ from tqdm import tqdm
 import open_clip
 from open_clip.factory import get_tokenizer
 from training.scheduler import cosine_lr
-from training.train import AverageMeter
+import transformers
 
 try:
     import evaluate
@@ -94,12 +91,6 @@ def parse_args(args):
         "--seed", type=int, default=0, help="Default random seed."
     )
     parser.add_argument(
-        "--separator-token",
-        default="<end_of_text>",
-        type=str,
-        help="Separator token.",
-    )
-    parser.add_argument(
         "--validation-key",
         default="validation",
         type=str,
@@ -146,7 +137,7 @@ class EarlyStopping:
 class GLUEDataset(Dataset):
     """GLUE dataset."""
 
-    def __init__(self, task, split, text_key, label_key, separator_token='<end_of_text>', tokenizer=None):
+    def __init__(self, task, split, text_key, label_key, separator_token=None, tokenizer=None):
         super().__init__()
 
         try:
@@ -157,6 +148,7 @@ class GLUEDataset(Dataset):
         self.dataset = load_dataset("glue", task, split=split)
         self.label_key = label_key
         self.text_key = text_key # list of strings
+        assert len(self.text_key) <= 2 and isinstance(self.text_key, list)
         self.length = len(self.dataset)
         self.tokenize = tokenizer
         self.task = task
@@ -176,6 +168,7 @@ class GLUEDataset(Dataset):
                 'label': label
             }
         else:
+            assert len(self.text_key) == 1
             item = self.dataset[idx]
             text = item[self.text_key[0]]
             label = item[self.label_key]
@@ -209,6 +202,9 @@ def get_task_metric(task_name):
 def get_task_dataloaders(args):
     tokenizer = get_tokenizer(args.model)
     task_name = args.task_name
+    roberta_tokenizer = isinstance(tokenizer, transformers.models.roberta.tokenization_roberta.RobertaTokenizer) or isinstance(tokenizer, transformers.models.roberta.tokenization_roberta_fast.RobertaTokenizerFast)
+    separator_token = '</s>' if roberta_tokenizer else '<end_of_text>'
+    is_train = (split_name == "train")
 
     dataloaders = {}
     for split_name in ["train", args.validation_key, args.test_key]:
@@ -218,7 +214,7 @@ def get_task_dataloaders(args):
             text_key=TEXT_KEYS[task_name],
             label_key="label",
             tokenizer=tokenizer,
-            separator_token=args.separator_token
+            separator_token=separator_token
         )
         dataloader = DataLoader(
             dataset,
@@ -226,12 +222,18 @@ def get_task_dataloaders(args):
             shuffle=True,
             num_workers=args.workers,
             pin_memory=False,
-            drop_last=split_name == "train",
+            drop_last=is_train,
         )
         dataloaders[split_name] = dataloader
 
     return dataloaders
 
+
+def get_loss_fn(task_name):
+    if task_name == "stsb":
+        return nn.functional.mse_loss
+    else:
+        return nn.functional.cross_entropy
 
 def compute_metrics(model, dataloader, device, args):
     model.eval()
@@ -245,8 +247,7 @@ def compute_metrics(model, dataloader, device, args):
             samples_seen += text.shape[0]
             logits = model(text)
             predictions = torch.argmax(logits, dim=-1).float()
-            loss_fn = nn.functional.mse_loss if args.task_name == "stsb" else nn.functional.cross_entropy
-            batch_val_loss = loss_fn[args.task_name](logits, label, reduction='sum')
+            batch_val_loss = get_loss_fn(args.task_name)(logits, label, reduction='sum')
         val_loss += batch_val_loss.item()
         metric.add_batch(
             predictions=predictions.cpu().numpy(),
@@ -269,8 +270,7 @@ def train_one_epoch(model, data, epoch, optimizer, scheduler, early_stop, device
         label = batch["label"].to(device)
 
         logits = model(text)
-        loss_fn = nn.functional.mse_loss if args.task_name == "stsb" else nn.functional.cross_entropy
-        loss = loss_fn[args.task_name](logits, label)
+        loss = get_loss_fn(args.task_name)(logits, label)
 
         optimizer.zero_grad()
         loss.backward()
