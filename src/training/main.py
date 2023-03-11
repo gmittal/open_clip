@@ -63,6 +63,7 @@ def get_latest_checkpoint(path: str, remote : bool):
     else:
         checkpoints = glob.glob(path + '**/*.pt', recursive=True)
     if checkpoints:
+        checkpoints = [ckpt for ckpt in checkpoints if ckpt.strip().endswith('.pt')]
         checkpoints = sorted(checkpoints, key=natural_key)
         return checkpoints[-1]
     return None
