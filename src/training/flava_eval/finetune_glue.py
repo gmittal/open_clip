@@ -300,6 +300,9 @@ def train_n_steps(model, data, optimizer, scheduler, early_stop, device, args):
                 progress_bar.close()
                 return metrics, end_training
 
+            print(f"Loss: {loss.item():.4f}")
+            print(metrics)
+
     progress_bar.close()
 
     metrics = compute_metrics(model, data[args.validation_key], device, args)
