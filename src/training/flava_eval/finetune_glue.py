@@ -49,6 +49,9 @@ def parse_args(args):
     parser.add_argument(
         "--epochs", type=int, default=1000, help="Number of epochs to train for."
     )
+    parser.add_argument(
+        "--num_steps", type=int, default=0, help="Number of steps to train for."
+    )
     parser.add_argument("--lr", type=float, default=3e-5, help="Learning rate.")
     parser.add_argument("--beta1", type=float, default=0.9, help="Adam beta 1.")
     parser.add_argument("--beta2", type=float, default=0.999, help="Adam beta 2.")
@@ -261,6 +264,45 @@ def compute_metrics(model, dataloader, device, args):
     metrics["loss"] = val_loss / samples_seen
     return metrics
 
+def train_n_steps(model, data, optimizer, scheduler, early_stop, args):
+    model.train()
+    progress_bar = tqdm(total=args.n_steps)
+    for i in range(args.n_steps):
+        scheduler(i)
+
+        try:
+            batch = next(data["train"])
+        except StopIteration:
+            data = get_task_dataloaders(args)
+            batch = next(data["train"])
+        text = batch["text"].to(args.device)
+        label = batch["label"].to(args.device)
+
+        logits = model(text)
+        if args.task_name == "stsb":
+            logits = logits.view(-1)
+            label = label.view(-1).float()
+        loss = get_loss_fn(args.task_name)(logits, label)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        progress_bar.set_description(f"Loss: {loss.item():.4f}")    
+        progress_bar.update(1)
+
+        if (i % args.val_frequency) == 0 and i > 0:
+            metrics = compute_metrics(model, data[args.validation_key], args.device, args)
+            end_training = early_stop.step(metrics)
+            if end_training:
+                progress_bar.close()
+                return metrics, end_training
+        
+    progress_bar.close()
+
+    metrics = compute_metrics(model, data[args.validation_key], args.device, args)
+    end_training = early_stop.step(metrics)
+    return metrics, end_training
 
 def train_one_epoch(model, data, epoch, optimizer, scheduler, early_stop, device, args):
     model.train()
@@ -322,11 +364,16 @@ def main(args):
         metric_name=args.early_stop_metric_name,
     )
 
-    for epoch in range(args.epochs):
-        val_metrics, end_training = train_one_epoch(clf, data, epoch, optim, scheduler, early_stop, device, args)
+    if args.num_steps > 0:
+        val_metrics, end_training = train_n_steps(clf, data, optim, scheduler, early_stop, args)
         if end_training:
             print("Stopped early to prevent overfitting.")
-            break
+    else:
+        for epoch in range(args.epochs):
+            val_metrics, end_training = train_one_epoch(clf, data, epoch, optim, scheduler, early_stop, device, args)
+            if end_training:
+                print("Stopped early to prevent overfitting.")
+                break
 
     print(early_stop.best_metrics)
 
