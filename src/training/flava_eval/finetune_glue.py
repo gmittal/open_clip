@@ -50,7 +50,7 @@ def parse_args(args):
         "--epochs", type=int, default=1000, help="Number of epochs to train for."
     )
     parser.add_argument(
-        "--num_steps", type=int, default=0, help="Number of steps to train for."
+        "--num-steps", type=int, default=0, help="Number of steps to train for."
     )
     parser.add_argument("--lr", type=float, default=3e-5, help="Learning rate.")
     parser.add_argument("--beta1", type=float, default=0.9, help="Adam beta 1.")
@@ -264,19 +264,21 @@ def compute_metrics(model, dataloader, device, args):
     metrics["loss"] = val_loss / samples_seen
     return metrics
 
-def train_n_steps(model, data, optimizer, scheduler, early_stop, args):
+def train_n_steps(model, data, optimizer, scheduler, early_stop, device, args):
     model.train()
-    progress_bar = tqdm(total=args.n_steps)
-    for i in range(args.n_steps):
+    progress_bar = tqdm(total=args.num_steps)
+    data_train = iter(data['train'])
+    for i in range(args.num_steps):
         scheduler(i)
 
         try:
-            batch = next(data["train"])
+            batch = next(data_train)
         except StopIteration:
             data = get_task_dataloaders(args)
-            batch = next(data["train"])
-        text = batch["text"].to(args.device)
-        label = batch["label"].to(args.device)
+            data_train = iter(data['train'])
+            batch = next(data_train)
+        text = batch["text"].to(device)
+        label = batch["label"].to(device)
 
         logits = model(text)
         if args.task_name == "stsb":
@@ -288,19 +290,19 @@ def train_n_steps(model, data, optimizer, scheduler, early_stop, args):
         loss.backward()
         optimizer.step()
 
-        progress_bar.set_description(f"Loss: {loss.item():.4f}")    
+        progress_bar.set_description(f"Loss: {loss.item():.4f}")
         progress_bar.update(1)
 
         if (i % args.val_frequency) == 0 and i > 0:
-            metrics = compute_metrics(model, data[args.validation_key], args.device, args)
+            metrics = compute_metrics(model, data[args.validation_key], device, args)
             end_training = early_stop.step(metrics)
             if end_training:
                 progress_bar.close()
                 return metrics, end_training
-        
+
     progress_bar.close()
 
-    metrics = compute_metrics(model, data[args.validation_key], args.device, args)
+    metrics = compute_metrics(model, data[args.validation_key], device, args)
     end_training = early_stop.step(metrics)
     return metrics, end_training
 
@@ -365,7 +367,7 @@ def main(args):
     )
 
     if args.num_steps > 0:
-        val_metrics, end_training = train_n_steps(clf, data, optim, scheduler, early_stop, args)
+        val_metrics, end_training = train_n_steps(clf, data, optim, scheduler, early_stop, device, args)
         if end_training:
             print("Stopped early to prevent overfitting.")
     else:
