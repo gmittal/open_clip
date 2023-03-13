@@ -203,7 +203,7 @@ def get_task_metric(task_name):
 
 
 def get_task_dataloaders(args):
-    tokenizer = get_tokenizer(args.model)
+    tokenizer = get_tokenizer(args.model, unimodal=True)
     task_name = args.task_name
     roberta_tokenizer = isinstance(tokenizer, transformers.models.roberta.tokenization_roberta.RobertaTokenizer) or isinstance(tokenizer, transformers.models.roberta.tokenization_roberta_fast.RobertaTokenizerFast)
     separator_token = '</s>' if roberta_tokenizer else '<end_of_text>'
@@ -353,6 +353,7 @@ def main(args):
         args.pretrained,
         precision=args.precision,
         device=device,
+        pretrained_hf=False,
     )
     model_cfg = open_clip.factory.get_model_config(args.model)
     embed_dim = model_cfg["embed_dim"]
@@ -380,7 +381,7 @@ def main(args):
                 print("Stopped early to prevent overfitting.")
                 break
 
-    print(early_stop.best_metrics)
+    print(val_metrics)
 
 
 if __name__ == "__main__":
