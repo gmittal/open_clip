@@ -30,6 +30,8 @@ NUM_LABELS = {"mnli": 3,
                 "qnli": 3,
                 "qqp": 2,
                 "rte": 3,
+                "sst2": 2,
+                "cola": 2,
                 "stsb": 1}
 
 def parse_args(args):
@@ -54,9 +56,9 @@ def parse_args(args):
     )
     parser.add_argument("--lr", type=float, default=3e-5, help="Learning rate.")
     parser.add_argument("--beta1", type=float, default=0.9, help="Adam beta 1.")
-    parser.add_argument("--beta2", type=float, default=0.999, help="Adam beta 2.")
-    parser.add_argument("--eps", type=float, default=1e-8, help="Adam epsilon.")
-    parser.add_argument("--wd", type=float, default=0.0, help="Weight decay.")
+    parser.add_argument("--beta2", type=float, default=0.98, help="Adam beta 2.")
+    parser.add_argument("--eps", type=float, default=1e-6, help="Adam epsilon.")
+    parser.add_argument("--wd", type=float, default=0.1, help="Weight decay.")
     parser.add_argument(
         "--warmup", type=int, default=100, help="Warmup steps."
     )
@@ -306,7 +308,7 @@ def train_n_steps(model, data, optimizer, scheduler, early_stop, device, args):
     progress_bar.close()
 
     metrics = compute_metrics(model, data[args.validation_key], device, args)
-    end_training = early_stop.step(metrics)
+    end_training = False #early_stop.step(metrics)
     return metrics, end_training
 
 def train_one_epoch(model, data, epoch, optimizer, scheduler, early_stop, device, args):
@@ -360,7 +362,7 @@ def main(args):
 
     data = get_task_dataloaders(args)
     clf = TextClassifier(model, embed_dim, NUM_LABELS[args.task_name]).to(device)
-    optim = torch.optim.AdamW(clf.parameters(), lr=args.lr, weight_decay=args.wd)
+    optim = torch.optim.AdamW(clf.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), eps=args.eps, weight_decay=args.wd)
 
     total_steps = len(data["train"]) * args.epochs
     scheduler = cosine_lr(optim, args.lr, args.warmup, total_steps)
