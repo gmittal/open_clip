@@ -180,9 +180,9 @@ def run(model, dataloader, device, args):
     return contrastive_text_accuracy.item(), \
            contrastive_image_accuracy.item(), \
            contrastive_group_accuracy.item(), \
-           itm_text_accuracy.item(), \
-           itm_image_accuracy.item(), \
-           itm_group_accuracy.item()
+           itm_text_accuracy.item() if isinstance(itm_text_accuracy, torch.Tensor) else itm_text_accuracy, \
+           itm_image_accuracy.item() if isinstance(itm_text_accuracy, torch.Tensor) else itm_image_accuracy, \
+           itm_group_accuracy.item() if isinstance(itm_group_accuracy, torch.Tensor) else itm_group_accuracy
 
 
 def main(args):

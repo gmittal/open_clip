@@ -68,6 +68,7 @@ class CLIPTextCfg:
     embed_cls: bool = False
     pad_id: int = 0
     output_tokens: bool = False
+    unimodal_context_length: int = 512
 
 
 def get_cast_dtype(precision: str):

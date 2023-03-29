@@ -42,15 +42,15 @@ def parse_args(args):
         "--workers", type=int, default=4, help="Number of dataloader workers per GPU."
     )
     parser.add_argument(
-        "--batch-size", type=int, default=128, help="Batch size per GPU."
+        "--batch-size", type=int, default=256, help="Batch size per GPU."
     )
     parser.add_argument(
         "--epochs", type=int, default=1000, help="Number of epochs to train for."
     )
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
     parser.add_argument("--beta1", type=float, default=0.9, help="Adam beta 1.")
-    parser.add_argument("--beta2", type=float, default=0.999, help="Adam beta 2.")
-    parser.add_argument("--eps", type=float, default=1e-8, help="Adam epsilon.")
+    parser.add_argument("--beta2", type=float, default=0.98, help="Adam beta 2.")
+    parser.add_argument("--eps", type=float, default=1e-6, help="Adam epsilon.")
     parser.add_argument("--wd", type=float, default=0.01, help="Weight decay.")
     parser.add_argument(
         "--warmup", type=int, default=2000, help="Number of steps to warmup for."
@@ -303,7 +303,7 @@ def main(args):
     data = get_task_dataloaders(preprocess_val, args)
     clf_cls = FLAVAMultimodalClassifier if args.model.startswith("flava") else CLIPMultimodalClassifier
     clf = clf_cls(model, embed_dim, 1).to(device)
-    optim = torch.optim.AdamW(clf.parameters(), lr=args.lr, weight_decay=args.wd)
+    optim = torch.optim.AdamW(clf.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), eps=args.eps, weight_decay=args.wd)
 
     total_steps = len(data["train"]) * args.epochs
     scheduler = cosine_lr(optim, args.lr, args.warmup, total_steps)
