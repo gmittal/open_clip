@@ -477,7 +477,7 @@ def parse_args(args):
     parser.add_argument(
         "--flava-mae-norm-pix-loss",
         type=bool,
-        default=True,
+        default=False,
         help="If True, normalize MAE loss by number of pixels in image."
     )
     parser.add_argument(
