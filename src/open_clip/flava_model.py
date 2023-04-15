@@ -166,7 +166,8 @@ class MaskedVisionDecoder(VisionTransformer):
 class MultimodalTransformer(nn.Module):
     def __init__(
             self,
-            context_length: int,
+            grid_size: int,
+            text_context_length: int,
             width: int,
             layers: int,
             heads: int,
@@ -184,6 +185,8 @@ class MultimodalTransformer(nn.Module):
         self.ln_pre = norm_layer(width)
 
         self.num_heads = heads
+
+        context_length = 1 + grid_size * grid_size + text_context_length + 1
         self.positional_embedding = nn.Parameter(scale * torch.randn(context_length, width))
         self.transformer = Transformer(
             width,
@@ -202,7 +205,9 @@ class MultimodalTransformer(nn.Module):
 
     def init_parameters(self):
         nn.init.normal_(self.class_embedding, std=0.02)
-        nn.init.normal_(self.positional_embedding, std=0.01)
+
+        # pos_embed = get_2d_sincos_pos_embed(self.positional_embedding.shape[-1], int(self.grid_size[0]), cls_token=True)
+        # self.positional_embedding.data.copy_(torch.from_numpy(pos_embed).float())
 
         proj_std = (self.transformer.width ** -0.5) * ((2 * self.transformer.layers) ** -0.5)
         attn_std = self.transformer.width ** -0.5
@@ -346,14 +351,16 @@ def _build_vision_mae_decoder(
 def _build_multimodal_tower(
         embed_dim: int,
         multimodal_cfg: FLAVAMultimodalCfg,
-        context_length: int,
+        grid_size: int,
+        text_context_length: int,
         quick_gelu: bool = False,
         cast_dtype: Optional[torch.dtype] = None
 ):
     act_layer = QuickGELU if quick_gelu else nn.GELU
     norm_layer = LayerNormFp32 if cast_dtype in (torch.float16, torch.bfloat16) else LayerNorm
     multimodal = MultimodalTransformer(
-        context_length=context_length,
+        grid_size=grid_size,
+        text_context_length=text_context_length,
         width=multimodal_cfg.width,
         heads=multimodal_cfg.heads,
         layers=multimodal_cfg.layers,
@@ -407,7 +414,8 @@ class FLAVA(nn.Module):
         self.multimodal = _build_multimodal_tower(
             embed_dim,
             multimodal_cfg,
-            multimodal_context_length,
+            grid_size,
+            text_context_length,
             quick_gelu,
             cast_dtype,
         )
