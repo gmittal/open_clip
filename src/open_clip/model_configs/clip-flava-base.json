@@ -21,7 +21,7 @@
       },
       "context_length": 77,
       "unimodal_context_length": 512,
-      "pooler_type": "cls_pooler",
-      "proj": "mlp"
+      "pooler_type": "identity_pooler",
+      "proj": "linear"
   }
 }

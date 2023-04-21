@@ -293,6 +293,8 @@ class CustomTextCLIP(nn.Module):
 
     def encode_text(self, text, normalize: bool = False):
         features = self.text(text)
+        if features.ndim == 3:
+            features = features[:, 0, :]
         return F.normalize(features, dim=-1) if normalize else features
 
     def forward(self, image, text, output_dict=False):

@@ -237,9 +237,9 @@ class ITMLoss(nn.Module):
         super().__init__()
 
     def forward(self, itm_logits, itm_labels):
-        itm_logits = itm_logits.view(-1)
+        itm_logits = itm_logits.view(-1, 2)
         itm_labels = itm_labels.view(-1)
-        return F.binary_cross_entropy_with_logits(itm_logits, itm_labels)
+        return F.cross_entropy(itm_logits, itm_labels)
 
 
 class MAELoss(nn.Module):
@@ -325,11 +325,11 @@ class FlavaLoss(ClipLoss):
         # mae
         image,
         mae_mask,
-        mm_mae_logits,
+        # mm_mae_logits,
 
         # mlm
         mlm_labels,
-        mm_mlm_logits,
+        # mm_mlm_logits,
 
         # itm
         itm_logits,
@@ -339,19 +339,19 @@ class FlavaLoss(ClipLoss):
     ):
         clip_loss = super().forward(image_features, text_features, logit_scale)
         itm_loss = self.itm_loss(itm_logits, itm_labels)
-        mm_mlm_loss = self.mlm_loss(mm_mlm_logits, mlm_labels)
-        mm_mae_loss = self.mae_loss(image, mm_mae_logits, mae_mask)
+        # mm_mlm_loss = self.mlm_loss(mm_mlm_logits, mlm_labels)
+        # mm_mae_loss = self.mae_loss(image, mm_mae_logits, mae_mask)
 
         clip_loss = self.contrastive_loss_weight * clip_loss
         itm_loss = self.itm_loss_weight * itm_loss
-        mm_mlm_loss = self.mlm_loss_weight * mm_mlm_loss
-        mm_mae_loss = self.mae_loss_weight * mm_mae_loss
+        # mm_mlm_loss = self.mlm_loss_weight * mm_mlm_loss
+        # mm_mae_loss = self.mae_loss_weight * mm_mae_loss
 
         if output_dict:
             return {
                 "contrastive_loss": clip_loss,
                 "itm_loss": itm_loss,
-                "mlm_loss": mm_mlm_loss,
-                "mae_loss": mm_mae_loss,
+                # "mlm_loss": mm_mlm_loss,
+                # "mae_loss": mm_mae_loss,
             }
         return clip_loss, itm_loss, mm_mlm_loss, mm_mae_loss

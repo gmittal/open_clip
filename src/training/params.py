@@ -469,12 +469,6 @@ def parse_args(args):
         help="MLM masking probability when training FLAVA."
     )
     parser.add_argument(
-        "--flava-itm-prob",
-        type=float,
-        default=0.1,
-        help="ITM negative probability when training FLAVA."
-    )
-    parser.add_argument(
         "--flava-mae-norm-pix-loss",
         type=bool,
         default=False,

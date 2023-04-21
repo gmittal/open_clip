@@ -64,21 +64,21 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 
 class MaskedVisionTransformer(VisionTransformer):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.initialize_weights()
+    # def __init__(self, *args, **kwargs):
+    #     super().__init__(*args, **kwargs)
+    #     self.initialize_weights()
 
-    def initialize_weights(self):
-        # initialize (and freeze) pos_embed by sin-cos embedding
-        pos_embed = get_2d_sincos_pos_embed(self.positional_embedding.shape[-1], int(self.grid_size[0]), cls_token=True)
-        self.positional_embedding.data.copy_(torch.from_numpy(pos_embed).float())
+    # def initialize_weights(self):
+    #     # initialize (and freeze) pos_embed by sin-cos embedding
+    #     pos_embed = get_2d_sincos_pos_embed(self.positional_embedding.shape[-1], int(self.grid_size[0]), cls_token=True)
+    #     self.positional_embedding.data.copy_(torch.from_numpy(pos_embed).float())
 
-        # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
-        w = self.conv1.weight.data
-        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+    #     # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
+    #     w = self.conv1.weight.data
+    #     torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
 
-        # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
-        torch.nn.init.normal_(self.class_embedding, std=.02)
+    #     # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
+    #     torch.nn.init.normal_(self.class_embedding, std=.02)
 
     def random_masking(self, x, mask_ratio):
         """
@@ -439,11 +439,7 @@ class FLAVA(nn.Module):
         )
 
         # ITM
-        self.itm_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 2),
-            nn.GELU(),
-            nn.Linear(embed_dim * 2, 1),
-        )
+        self.itm_head = nn.Linear(embed_dim, 2)
 
         # Output projections
         self.image_projection = nn.Linear(embed_dim, embed_dim)
@@ -541,23 +537,20 @@ class FLAVA(nn.Module):
             'image': image,
         }
 
-    def forward_flava(self, *, image, text, text_masked, itm_neg_text_idx, mlm_labels, itm_labels):
-        # Language features
+    def forward_flava(self, *, image, text, text_masked, mlm_labels):
         h_text = self.text(text)
+        h_masked_text = self.text(text_masked)
+        h_image, _, _ = self.visual(image, mask_ratio=0)
+
+        # CLIP
         cls_t = h_text[:, 0, :]
         text_encoding = self.text_projection(cls_t)
         text_encoding = F.normalize(text_encoding, dim=-1)
-
-        # Masked language features
-        h_masked_text = self.text(text_masked)
-
-        # Image features
-        h_image, _, _ = self.visual(image, mask_ratio=0)
         cls_i = h_image[:, 0, :]
         image_encoding = self.image_projection(cls_i)
         image_encoding = F.normalize(image_encoding, dim=-1)
 
-        # Masked image features
+        # MAE encoder
         h_masked_image, mae_mask, ids_restore = self.visual(image, mask_ratio=self.mae_mask_ratio)
 
         # Multimodal attention mask (ignore text padding tokens)
@@ -569,14 +562,50 @@ class FLAVA(nn.Module):
         mm_h_image = self.image_to_mm_projection(h_image)
         mm_h_text = self.text_to_mm_projection(h_text)
         mm_h_masked_text = self.text_to_mm_projection(h_masked_text)
-        mm_h_itm_text = self.text_to_mm_projection(h_text[itm_neg_text_idx])
 
-        # Image-text matching
-        mm_itm_input = torch.cat([mm_h_image, mm_h_itm_text], dim=1)
-        h_m_itm = self.multimodal(mm_itm_input, attn_mask=mm_attn_mask)
-        cls_m_itm = h_m_itm[:, 0, :]
-        itm_logits = self.itm_head(self.mm_projection(cls_m_itm))
+        # Image-text matching (ITM)
+        logits = self.logit_scale * (image_encoding @ text_encoding.T)
+        local_bs = h_text.shape[0]
+        pos_idx = torch.arange(local_bs // 2).to(h_text.device)
 
+        # ITM: positives
+        mm_pos = self.multimodal(
+            torch.cat([mm_h_image, mm_h_text], dim=1),
+            attn_mask=mm_attn_mask,
+        )
+
+        # ITM: select a negative image for each text
+        weights_t2i = torch.softmax(logits.T, dim=1).fill_diagonal_(0)
+        idx_t2i = torch.multinomial(weights_t2i, 1).view(-1)
+        idx_t2i = idx_t2i[: local_bs // 2]
+        mm_neg_h_image = torch.index_select(mm_h_image, 0, idx_t2i)
+        mm_pos_h_text = torch.index_select(mm_h_text, 0, pos_idx)
+        mm_neg_t2i = self.multimodal(
+            torch.cat([mm_neg_h_image, mm_pos_h_text], dim=1),
+            attn_mask=mm_attn_mask[: local_bs // 2],
+        )
+
+        # ITM: select a negative text for each image
+        weights_i2t = torch.softmax(logits, dim=1).fill_diagonal_(0)
+        idx_i2t = torch.multinomial(weights_i2t, 1).view(-1)
+        idx_i2t = idx_i2t[: local_bs // 2]
+        mm_pos_h_image = torch.index_select(mm_h_image, 0, pos_idx)
+        mm_neg_h_text = torch.index_select(mm_h_text, 0, idx_i2t)
+        mm_neg_i2t = self.multimodal(
+            torch.cat([mm_pos_h_image, mm_neg_h_text], dim=1),
+            attn_mask=mm_attn_mask[: local_bs // 2],
+        )
+
+        # ITM: compute logits and labels
+        itm_vl_embed = torch.cat([mm_pos, mm_neg_t2i, mm_neg_i2t], dim=0)
+        itm_logits = self.itm_head(self.mm_projection(itm_vl_embed[:, 0, :]))
+        itm_labels = torch.cat([
+            torch.ones(mm_pos.shape[0], dtype=torch.long, device=mm_pos.device),
+            torch.zeros(mm_neg_t2i.shape[0] + mm_neg_i2t.shape[0], dtype=torch.long, device=mm_pos.device)
+        ], dim=0)
+
+
+        """
         # Multimodal cross-attention MLM (full images, masked text)
         mm_mlm_input = torch.cat([mm_h_image, mm_h_masked_text], dim=1)
         h_m_mlm = self.multimodal(mm_mlm_input, attn_mask=mm_attn_mask)
@@ -613,6 +642,7 @@ class FLAVA(nn.Module):
             uni_mae_logits = self.mae_decoder(self.image_projection(image_with_mask_tokens))
             assert uni_mae_logits.shape == mm_mae_logits.shape
             mm_mae_logits = mm_mae_logits + uni_mae_logits
+        """
 
         return {
             # contrastive outputs
@@ -622,8 +652,8 @@ class FLAVA(nn.Module):
 
             # multimodal outputs
             'itm_logits': itm_logits,
-            'mm_mlm_logits': mm_mlm_logits,
-            'mm_mae_logits': mm_mae_logits,
+            # 'mm_mlm_logits': mm_mlm_logits,
+            # 'mm_mae_logits': mm_mae_logits,
 
             # labels
             'mlm_labels': mlm_labels[:, 1:],  # remove cls token from labels
@@ -638,11 +668,9 @@ class FLAVA(nn.Module):
         image=None,
         text=None,
         text_masked=None,
-        itm_neg_text_idx=None,
 
         # passthrough
         mlm_labels=None,
-        itm_labels=None,
 
         # unimodal flags
         unimodal_mae=False,
@@ -652,21 +680,20 @@ class FLAVA(nn.Module):
     ):
         if unimodal_mlm:
             assert text_masked is not None and mlm_labels is not None
-            return self.forward_mlm(text_masked=text_masked, mlm_labels=mlm_labels)
+            return self.forward_mlm(
+                text_masked=text_masked,
+                mlm_labels=mlm_labels,
+            )
         elif unimodal_mae:
             assert image is not None
             return self.forward_mae(image=image)
         else:
             assert image is not None and \
                    text is not None and \
-                   itm_neg_text_idx is not None and \
-                   mlm_labels is not None and \
-                   itm_labels is not None
+                   mlm_labels is not None
             return self.forward_flava(
                 image=image,
                 text=text,
                 text_masked=text_masked,
-                itm_neg_text_idx=itm_neg_text_idx,
                 mlm_labels=mlm_labels,
-                itm_labels=itm_labels,
             )

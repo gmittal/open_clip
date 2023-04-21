@@ -4,7 +4,7 @@ from transformers import DataCollatorForLanguageModeling
 from .tokenizer import HFTokenizer
 
 
-def get_flava_collate(hf_tokenizer, mlm_prob=0.15, itm_prob=0.1):
+def get_flava_collate(hf_tokenizer, mlm_prob=0.15):
     assert isinstance(hf_tokenizer, HFTokenizer), 'tokenizer must be HFTokenizer'
     tokenizer = hf_tokenizer.tokenizer
     mlm_collator = DataCollatorForLanguageModeling(
@@ -25,19 +25,6 @@ def get_flava_collate(hf_tokenizer, mlm_prob=0.15, itm_prob=0.1):
             "text": text,
         }
 
-        # ITM
-        bs = image.shape[0]
-        itm_labels = torch.bernoulli(torch.ones(bs, dtype=image.dtype) * (1 - itm_prob))
-        itm_idx_mask = itm_labels.byte()
-        batch_idx = torch.arange(bs)
-        neg_batch_idx = (batch_idx + 1) % bs
-        negative_text_idx = itm_idx_mask * batch_idx + (1 - itm_idx_mask) * neg_batch_idx
-        batch.update({
-            "itm_neg_text_idx": negative_text_idx,
-            "itm_labels": itm_labels,
-        })
-
-        # MLM
         mlm_input = mlm_collator(text_list)  # TODO: add special_tokens_mask (improves efficiency)
         batch.update({
             "text_masked": mlm_input["input_ids"],
