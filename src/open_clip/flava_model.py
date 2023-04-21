@@ -439,12 +439,15 @@ class FLAVA(nn.Module):
         )
 
         # ITM
-        self.itm_head = nn.Linear(embed_dim, 2)
+        self.itm_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),  # TODO: should this be width?
+            nn.Tanh(),
+            nn.Linear(embed_dim, 2),
+        )
 
         # Output projections
         self.image_projection = nn.Linear(embed_dim, embed_dim)
         self.text_projection = nn.Linear(embed_dim, embed_dim)
-        self.mm_projection = nn.Linear(embed_dim, embed_dim)
 
         # Contrastive logit scale
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
@@ -485,9 +488,7 @@ class FLAVA(nn.Module):
 
         mm_input = torch.cat([mm_h_image, mm_h_text], dim=1)
         h_m = self.multimodal(mm_input, attn_mask=mm_attn_mask)
-        cls_m = h_m[:, 0, :]
-        mm_encoding = self.mm_projection(cls_m)
-        return F.normalize(mm_encoding, dim=-1) if normalize else mm_encoding
+        return h_m[:, 0, :]
 
     def forward_itm(self, image, text):
         h_image, _, _ = self.visual(image, mask_ratio=0)
@@ -503,7 +504,7 @@ class FLAVA(nn.Module):
         mm_input = torch.cat([mm_h_image, mm_h_text], dim=1)
         h_m = self.multimodal(mm_input, attn_mask=mm_attn_mask)
         cls_m = h_m[:, 0, :]
-        return self.itm_head(self.mm_projection(cls_m))
+        return self.itm_head(cls_m)
 
     def forward_mlm(self, *, text_masked, mlm_labels):
         h_masked_text = self.text(text_masked)
@@ -598,7 +599,7 @@ class FLAVA(nn.Module):
 
         # ITM: compute logits and labels
         itm_vl_embed = torch.cat([mm_pos, mm_neg_t2i, mm_neg_i2t], dim=0)
-        itm_logits = self.itm_head(self.mm_projection(itm_vl_embed[:, 0, :]))
+        itm_logits = self.itm_head(itm_vl_embed[:, 0, :])
         itm_labels = torch.cat([
             torch.ones(mm_pos.shape[0], dtype=torch.long, device=mm_pos.device),
             torch.zeros(mm_neg_t2i.shape[0] + mm_neg_i2t.shape[0], dtype=torch.long, device=mm_pos.device)
