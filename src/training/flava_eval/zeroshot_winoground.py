@@ -154,10 +154,10 @@ def run(model, dataloader, device, args):
 
             # compute ITM scores (for FLAVA)
             if args.model.startswith('flava'):
-                itm_score_c0_i0 = torch.sigmoid(model.forward_itm(i0, c0))
-                itm_score_c1_i0 = torch.sigmoid(model.forward_itm(i0, c1))
-                itm_score_c0_i1 = torch.sigmoid(model.forward_itm(i1, c0))
-                itm_score_c1_i1 = torch.sigmoid(model.forward_itm(i1, c1))
+                itm_score_c0_i0 = torch.softmax(model.forward_itm(i0, c0), dim=-1)[:, 1]
+                itm_score_c1_i0 = torch.softmax(model.forward_itm(i0, c1), dim=-1)[:, 1]
+                itm_score_c0_i1 = torch.softmax(model.forward_itm(i1, c0), dim=-1)[:, 1]
+                itm_score_c1_i1 = torch.softmax(model.forward_itm(i1, c1), dim=-1)[:, 1]
 
                 itm_text_correct = torch.logical_and(itm_score_c0_i0 > itm_score_c1_i0,
                                                      itm_score_c1_i1 > itm_score_c0_i1)
