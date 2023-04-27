@@ -317,21 +317,21 @@ class FlavaLoss(ClipLoss):
     def forward(
         self,
         *,
-        # contrastive
+        # CLIP
         image_features,
         text_features,
         logit_scale,
 
-        # mae
+        # MAE
         image,
         mae_mask,
         # mm_mae_logits,
 
-        # mlm
+        # MLM
         mlm_labels,
         # mm_mlm_logits,
 
-        # itm
+        # ITM
         itm_logits,
         itm_labels,
 

@@ -274,6 +274,8 @@ class CustomTextCLIP(nn.Module):
         self.visual = _build_vision_tower(embed_dim, vision_cfg, quick_gelu, cast_dtype)
         self.text = _build_text_tower(embed_dim, text_cfg, quick_gelu, cast_dtype)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        self.image_projection = nn.Linear(embed_dim, embed_dim)
+        self.text_projection = nn.Linear(embed_dim, embed_dim)
 
     def lock_image_tower(self, unlocked_groups=0, freeze_bn_stats=False):
         # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
@@ -289,12 +291,14 @@ class CustomTextCLIP(nn.Module):
 
     def encode_image(self, image, normalize: bool = False):
         features = self.visual(image)
+        features = self.image_projection(features)
         return F.normalize(features, dim=-1) if normalize else features
 
     def encode_text(self, text, normalize: bool = False):
         features = self.text(text)
         if features.ndim == 3:
             features = features[:, 0, :]
+        features = self.text_projection(features)
         return F.normalize(features, dim=-1) if normalize else features
 
     def forward(self, image, text, output_dict=False):

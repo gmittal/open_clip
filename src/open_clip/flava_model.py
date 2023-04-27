@@ -1,4 +1,3 @@
-"""FLAVA model"""
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple, Union
 
@@ -9,7 +8,7 @@ from torch import nn
 
 from .model import _build_text_tower
 from .transformer import LayerNorm, Transformer, VisionTransformer
-from .utils import to_2tuple
+from .transformer import LayerNormFp32, LayerNorm, QuickGELU, VisionTransformer
 
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
@@ -64,21 +63,21 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 
 class MaskedVisionTransformer(VisionTransformer):
 
-    # def __init__(self, *args, **kwargs):
-    #     super().__init__(*args, **kwargs)
-    #     self.initialize_weights()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.initialize_weights()
 
-    # def initialize_weights(self):
-    #     # initialize (and freeze) pos_embed by sin-cos embedding
-    #     pos_embed = get_2d_sincos_pos_embed(self.positional_embedding.shape[-1], int(self.grid_size[0]), cls_token=True)
-    #     self.positional_embedding.data.copy_(torch.from_numpy(pos_embed).float())
+    def initialize_weights(self):
+        # initialize (and freeze) pos_embed by sin-cos embedding
+        pos_embed = get_2d_sincos_pos_embed(self.positional_embedding.shape[-1], int(self.grid_size[0]), cls_token=True)
+        self.positional_embedding.data.copy_(torch.from_numpy(pos_embed).float())
 
-    #     # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
-    #     w = self.conv1.weight.data
-    #     torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
+        w = self.conv1.weight.data
+        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
 
-    #     # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
-    #     torch.nn.init.normal_(self.class_embedding, std=.02)
+        # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
+        torch.nn.init.normal_(self.class_embedding, std=.02)
 
     def random_masking(self, x, mask_ratio):
         """
@@ -108,9 +107,18 @@ class MaskedVisionTransformer(VisionTransformer):
         return x_masked, mask, ids_restore
 
     def forward(self, x, mask_ratio):
-        x = self.conv1(x)  # shape = [*, width, grid, grid]
-        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
-        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+        # to patches - whether to use dual patchnorm - https://arxiv.org/abs/2302.01327v1
+        if self.input_patchnorm:
+            # einops - rearrange(x, 'b c (h p1) (w p2) -> b (h w) (c p1 p2)')
+            x = x.reshape(x.shape[0], x.shape[1], self.grid_size[0], self.patch_size[0], self.grid_size[1], self.patch_size[1])
+            x = x.permute(0, 2, 4, 1, 3, 5)
+            x = x.reshape(x.shape[0], self.grid_size[0] * self.grid_size[1], -1)
+            x = self.patchnorm_pre_ln(x)
+            x = self.conv1(x)
+        else:
+            x = self.conv1(x)  # shape = [*, width, grid, grid]
+            x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+            x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
 
         # add pos embed w/o cls token
         x = x + self.positional_embedding[1:, :].to(x.dtype)
@@ -128,7 +136,16 @@ class MaskedVisionTransformer(VisionTransformer):
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
-        x = self.ln_post(x)
+
+        if self.attn_pool is not None:
+            x = self.attn_pool(x)
+            x = self.ln_post(x)
+            pooled, tokens = self._global_pool(x)
+            x = torch.cat((pooled[:, None, :], tokens), dim=1)
+        else:
+            pooled, tokens = self._global_pool(x)
+            x = torch.cat((pooled[:, None, :], tokens), dim=1)
+            x = self.ln_post(x)
 
         if self.proj is not None:
             x = x @ self.proj
@@ -259,7 +276,25 @@ class FLAVAVisionCfg:
     image_size: Union[Tuple[int, int], int] = 224
     ls_init_value: Optional[float] = None  # layer scale initial value
     patch_dropout: float = 0.  # what fraction of patches to dropout during training (0 would mean disabled and no patches dropped) - 0.5 to 0.75 recommended in the paper for optimal results
+    input_patchnorm: bool = False # whether to use dual patchnorm - would only apply the input layernorm on each patch, as post-layernorm already exist in original clip vit design
     global_average_pool: bool = False  # whether to global average pool the last embedding layer, instead of using CLS token (https://arxiv.org/abs/2205.01580)
+    attentional_pool: bool = False # whether to use attentional pooler in the last embedding layer
+    n_queries: int = 256 # n_queries for attentional pooler
+    attn_pooler_heads: int = 8 # n heads for attentional_pooling
+    timm_model_name: str = None  # a valid model name overrides layers, width, patch_size
+    timm_model_pretrained: bool = False  # use (imagenet) pretrained weights for named model
+    timm_pool: str = 'avg'  # feature pooling for timm model ('abs_attn', 'rot_attn', 'avg', '')
+    timm_proj: str = 'linear'  # linear projection for timm model output ('linear', 'mlp', '')
+    timm_proj_bias: bool = False  # enable bias final projection
+    timm_drop: float = 0.  # head dropout
+    timm_drop_path: Optional[float] = None  # backbone stochastic depth
+    output_tokens: bool = False
+    hf_model_name: str = None
+    hf_tokenizer_name: str = None
+    hf_model_pretrained: bool = True
+    hf_model_config: dict = None
+    proj: str = 'mlp'
+    pooler_type: str = 'mean_pooler'
 
     # MAE parameters
     mae_mask_ratio: float = 0.75
@@ -276,8 +311,9 @@ class FLAVATextCfg:
     hf_tokenizer_name: str = None
     hf_model_pretrained: bool = True
     hf_model_config: dict = None
-    proj: str = None
+    proj: str = 'linear'
     pooler_type: str = 'identity_pooler'
+    embed_cls: bool = False
     output_tokens: bool = False
 
 
@@ -288,6 +324,9 @@ class FLAVAMultimodalCfg:
     layers: int = 12
     mlp_ratio: float = 4.0
     ls_init_value: Optional[float] = None  # layer scale initial value
+
+    # MMM
+    xmmm: bool = False
 
     # Product-of-Experts
     poe_mlm: bool = False
@@ -315,7 +354,12 @@ def _build_vision_tower(
         mlp_ratio=vision_cfg.mlp_ratio,
         ls_init_value=vision_cfg.ls_init_value,
         patch_dropout=vision_cfg.patch_dropout,
+        input_patchnorm=vision_cfg.input_patchnorm,
         global_average_pool=vision_cfg.global_average_pool,
+        attentional_pool=vision_cfg.attentional_pool,
+        n_queries=vision_cfg.n_queries,
+        attn_pooler_heads=vision_cfg.attn_pooler_heads,
+        output_tokens=vision_cfg.output_tokens,
         output_dim=embed_dim,
         act_layer=act_layer,
         norm_layer=norm_layer,
@@ -385,22 +429,19 @@ class FLAVA(nn.Module):
     ):
         super().__init__()
 
-        # Vision encoder
         vision_cfg = FLAVAVisionCfg(**vision_cfg) if isinstance(vision_cfg, dict) else vision_cfg
         self.visual = _build_vision_tower(embed_dim, vision_cfg, quick_gelu, cast_dtype)
         grid_size = vision_cfg.image_size // vision_cfg.patch_size
-        visual_context_length = grid_size * grid_size + 1  # +1 for CLS_I token
-
-        # Text encoder
         text_cfg = FLAVATextCfg(**text_cfg) if isinstance(text_cfg, dict) else text_cfg
         self.text = _build_text_tower(embed_dim, text_cfg, quick_gelu, cast_dtype)
-        text_context_length = text_cfg.context_length  # includes CLS_T token
 
-        # unimodal MLM
+        norm_layer = LayerNormFp32 if cast_dtype in (torch.float16, torch.bfloat16) else LayerNorm
+        import pdb; pdb.set_trace()
         self.mlm_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 2),
+            nn.Linear(embed_dim, embed_dim),
             nn.GELU(),
-            nn.Linear(embed_dim * 2, self.text.config.vocab_size),
+            norm_layer(embed_dim),
+            nn.Linear(embed_dim, self.text.config.vocab_size),
         )
 
         # unimodal MAE
@@ -409,13 +450,12 @@ class FLAVA(nn.Module):
         self.mae_decoder = _build_vision_mae_decoder(vision_cfg, quick_gelu, cast_dtype)
 
         # Multimodal encoder
-        multimodal_context_length = visual_context_length + text_context_length + 1  # +1 for CLS_M token
         multimodal_cfg = FLAVAMultimodalCfg(**multimodal_cfg) if isinstance(multimodal_cfg, dict) else multimodal_cfg
         self.multimodal = _build_multimodal_tower(
             embed_dim,
             multimodal_cfg,
             grid_size,
-            text_context_length,
+            text_cfg.context_length,  # includes CLS_T token
             quick_gelu,
             cast_dtype,
         )
@@ -423,33 +463,34 @@ class FLAVA(nn.Module):
         self.text_to_mm_projection = nn.Linear(embed_dim, multimodal_cfg.width)
         self.poe_mlm = multimodal_cfg.poe_mlm
         self.poe_mae = multimodal_cfg.poe_mae
+        self.use_xmmm = multimodal_cfg.xmm
 
-        # Cross-modal MLM
+        # Multimodal MLM
         self.mm_mlm_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 2),
+            nn.Linear(embed_dim, embed_dim),
             nn.GELU(),
-            nn.Linear(embed_dim * 2, self.text.config.vocab_size),
+            norm_layer(embed_dim),
+            nn.Linear(embed_dim, self.text.config.vocab_size),
         )
 
-        # Cross-modal MAE
+        # Multimodal MAE
         self.mm_mae_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 2),
+            nn.Linear(embed_dim, embed_dim),
             nn.GELU(),
-            nn.Linear(embed_dim * 2, vision_cfg.patch_size ** 2 * 3, bias=True),  # patch reconstruction
+            norm_layer(embed_dim),
+            nn.Linear(embed_dim, vision_cfg.patch_size ** 2 * 3, bias=True),  # patch reconstruction
         )
 
         # ITM
         self.itm_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),  # TODO: should this be width?
+            nn.Linear(embed_dim, embed_dim),
             nn.Tanh(),
             nn.Linear(embed_dim, 2),
         )
 
-        # Output projections
+        # CLIP projections and logit scale
         self.image_projection = nn.Linear(embed_dim, embed_dim)
         self.text_projection = nn.Linear(embed_dim, embed_dim)
-
-        # Contrastive logit scale
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
         self.init_parameters()
@@ -475,7 +516,7 @@ class FLAVA(nn.Module):
         text_encoding = self.text_projection(cls_t)
         return F.normalize(text_encoding, dim=-1) if normalize else text_encoding
 
-    def encode_multimodal(self, image, text, normalize=False):
+    def encode_multimodal(self, image, text):
         h_image, _, _ = self.visual(image, mask_ratio=0)
         h_text = self.text(text)
         mm_h_image = self.image_to_mm_projection(h_image)
@@ -508,7 +549,7 @@ class FLAVA(nn.Module):
 
     def forward_mlm(self, *, text_masked, mlm_labels):
         h_masked_text = self.text(text_masked)
-        mlm_logits = self.mlm_head(self.text_projection(h_masked_text[:, 1:, :]))
+        mlm_logits = self.mlm_head(h_masked_text[:, 1:, :])
         return {
             'mlm_logits': mlm_logits,
             'mlm_labels': mlm_labels[:, 1:],  # remove cls token from labels
@@ -529,8 +570,7 @@ class FLAVA(nn.Module):
             index=ids_restore.unsqueeze(-1).repeat(1, 1, h_masked_image.shape[2]),
         )  # unshuffle
         image_with_mask_tokens = torch.cat([h_masked_image[:, :1, :], image_with_mask_tokens], dim=1)  # append cls token
-
-        mae_logits = self.mae_decoder(self.image_projection(image_with_mask_tokens))
+        mae_logits = self.mae_decoder(image_with_mask_tokens)
 
         return {
             'mae_logits': mae_logits,
@@ -542,6 +582,7 @@ class FLAVA(nn.Module):
         h_text = self.text(text)
         h_masked_text = self.text(text_masked)
         h_image, _, _ = self.visual(image, mask_ratio=0)
+        h_masked_image, mae_mask, ids_restore = self.visual(image, mask_ratio=self.mae_mask_ratio)
 
         # CLIP
         cls_t = h_text[:, 0, :]
@@ -550,9 +591,6 @@ class FLAVA(nn.Module):
         cls_i = h_image[:, 0, :]
         image_encoding = self.image_projection(cls_i)
         image_encoding = F.normalize(image_encoding, dim=-1)
-
-        # MAE encoder
-        h_masked_image, mae_mask, ids_restore = self.visual(image, mask_ratio=self.mae_mask_ratio)
 
         # Multimodal attention mask (ignore text padding tokens)
         mm_text_attn_mask = (text != self.text.config.pad_token_id).long()
@@ -606,14 +644,7 @@ class FLAVA(nn.Module):
         ], dim=0)
 
 
-        """
-        # Multimodal cross-attention MLM (full images, masked text)
-        mm_mlm_input = torch.cat([mm_h_image, mm_h_masked_text], dim=1)
-        h_m_mlm = self.multimodal(mm_mlm_input, attn_mask=mm_attn_mask)
-        mm_masked_text_pred = h_m_mlm[:, 1 + mm_h_image.shape[1]:, :]
-        mm_mlm_logits = self.mm_mlm_head(self.mm_projection(mm_masked_text_pred[:, 1:, :]))  # remove cls token
-
-        # Multimodal cross-attention MAE task (masked images, full text)
+        # MMM
         mae_mask_tokens = self.patch_mask_token.repeat(
             h_masked_image.shape[0],
             ids_restore.shape[1] + 1 - h_masked_image.shape[1],
@@ -627,11 +658,26 @@ class FLAVA(nn.Module):
         )  # unshuffle
         image_with_mask_tokens = torch.cat([h_masked_image[:, :1, :], image_with_mask_tokens], dim=1)  # append cls token
 
-        mm_image_with_mask_tokens = self.image_to_mm_projection(image_with_mask_tokens)
-        mm_mae_input = torch.cat([mm_image_with_mask_tokens, mm_h_text], dim=1)
-        h_m_mae = self.multimodal(mm_mae_input, attn_mask=mm_attn_mask)
-        mm_masked_patches_pred = h_m_mae[:, 1:mm_image_with_mask_tokens.shape[1] + 1, :]
-        mm_mae_logits = self.mm_mae_head(self.mm_projection(mm_masked_patches_pred[:, 1:, :]))  # remove cls token
+        if self.use_xmmm:
+            """
+            # Multimodal cross-attention MLM (full images, masked text)
+            mm_mlm_input = torch.cat([mm_h_image, mm_h_masked_text], dim=1)
+            h_m_mlm = self.multimodal(mm_mlm_input, attn_mask=mm_attn_mask)
+            mm_masked_text_pred = h_m_mlm[:, 1 + mm_h_image.shape[1]:, :]
+            mm_mlm_logits = self.mm_mlm_head(self.mm_projection(mm_masked_text_pred[:, 1:, :]))  # remove cls token
+
+            # Multimodal cross-attention MAE task (masked images, full text)
+
+            mm_image_with_mask_tokens = self.image_to_mm_projection(image_with_mask_tokens)
+            mm_mae_input = torch.cat([mm_image_with_mask_tokens, mm_h_text], dim=1)
+            h_m_mae = self.multimodal(mm_mae_input, attn_mask=mm_attn_mask)
+            mm_masked_patches_pred = h_m_mae[:, 1:mm_image_with_mask_tokens.shape[1] + 1, :]
+            mm_mae_logits = self.mm_mae_head(self.mm_projection(mm_masked_patches_pred[:, 1:, :]))  # remove cls token
+            """
+        else:
+            mmm_input = torch.cat([mm_h_masked_image, mm_h_masked_text], dim=1)
+            h_mmm = self.multimodal(mm_mmm_input, attn_mask=mm_attn_mask)
+
 
         # Product-of-Experts (Hinton '02)
         # https://aclanthology.org/2021.acl-long.522.pdf
@@ -640,10 +686,9 @@ class FLAVA(nn.Module):
             assert uni_mlm_logits.shape == mm_mlm_logits.shape
             mm_mlm_logits = mm_mlm_logits + uni_mlm_logits
         if self.poe_mae:
-            uni_mae_logits = self.mae_decoder(self.image_projection(image_with_mask_tokens))
+            uni_mae_logits = self.mae_decoder(image_with_mask_tokens)
             assert uni_mae_logits.shape == mm_mae_logits.shape
             mm_mae_logits = mm_mae_logits + uni_mae_logits
-        """
 
         return {
             # contrastive outputs
