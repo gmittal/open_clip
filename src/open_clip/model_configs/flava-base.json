@@ -34,6 +34,7 @@
   "multimodal_cfg": {
     "layers": 6,
     "width": 768,
-    "heads": 12
+    "heads": 12,
+    "xmmm": false
   }
 }

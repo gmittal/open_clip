@@ -35,8 +35,6 @@
     "layers": 6,
     "width": 768,
     "heads": 12,
-    "poe_mlm": true,
-    "poe_mae": true,
-    "xmmm": false
+    "xmmm": true
   }
 }
