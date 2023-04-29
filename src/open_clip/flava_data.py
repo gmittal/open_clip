@@ -25,6 +25,7 @@ def get_flava_collate(hf_tokenizer, mlm_prob=0.15):
             "text": text,
         }
 
+        # TODO: add whole word masking
         mlm_input = mlm_collator(text_list)  # TODO: add special_tokens_mask (improves efficiency)
         batch.update({
             "text_masked": mlm_input["input_ids"],

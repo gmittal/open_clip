@@ -436,7 +436,6 @@ class FLAVA(nn.Module):
         self.text = _build_text_tower(embed_dim, text_cfg, quick_gelu, cast_dtype)
 
         norm_layer = LayerNormFp32 if cast_dtype in (torch.float16, torch.bfloat16) else LayerNorm
-        import pdb; pdb.set_trace()
         self.mlm_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
             nn.GELU(),
@@ -463,7 +462,7 @@ class FLAVA(nn.Module):
         self.text_to_mm_projection = nn.Linear(embed_dim, multimodal_cfg.width)
         self.poe_mlm = multimodal_cfg.poe_mlm
         self.poe_mae = multimodal_cfg.poe_mae
-        self.use_xmmm = multimodal_cfg.xmm
+        self.use_xmmm = multimodal_cfg.xmmm
 
         # Multimodal MLM
         self.mm_mlm_head = nn.Sequential(
@@ -504,6 +503,12 @@ class FLAVA(nn.Module):
         self.text.grad_checkpointing(enable)
         self.multimodal.grad_checkpointing(enable)
 
+    def _build_mm_attn_mask(self, text, num_patches_with_cls):
+        mm_text_attn_mask = (text != self.text.config.pad_token_id).long()
+        mm_vis_attn_mask = torch.ones((text.shape[0], num_patches_with_cls),
+                                      dtype=torch.long, device=mm_text_attn_mask.device)
+        return torch.cat([mm_vis_attn_mask, mm_text_attn_mask], dim=1)
+
     def encode_image(self, image, normalize=False):
         h_image, _, _ = self.visual(image, mask_ratio=0)
         cls_i = h_image[:, 0, :]
@@ -522,13 +527,9 @@ class FLAVA(nn.Module):
         mm_h_image = self.image_to_mm_projection(h_image)
         mm_h_text = self.text_to_mm_projection(h_text)
 
-        # Multimodal attention mask (ignore text padding tokens)
-        mm_text_attn_mask = (text != self.text.config.pad_token_id).long()
-        mm_vis_attn_mask = torch.ones(*h_image.shape[:2], dtype=torch.long, device=mm_text_attn_mask.device)
-        mm_attn_mask = torch.cat([mm_vis_attn_mask, mm_text_attn_mask], dim=1)
-
-        mm_input = torch.cat([mm_h_image, mm_h_text], dim=1)
-        h_m = self.multimodal(mm_input, attn_mask=mm_attn_mask)
+        h_m = self.multimodal(
+            torch.cat([mm_h_image, mm_h_text], dim=1),
+            attn_mask=self._build_mm_attn_mask(text, h_image.shape[1]))
         return h_m[:, 0, :]
 
     def forward_itm(self, image, text):
@@ -537,15 +538,11 @@ class FLAVA(nn.Module):
         mm_h_image = self.image_to_mm_projection(h_image)
         mm_h_text = self.text_to_mm_projection(h_text)
 
-        # Multimodal attention mask (ignore text padding tokens)
-        mm_text_attn_mask = (text != self.text.config.pad_token_id).long()
-        mm_vis_attn_mask = torch.ones(*h_image.shape[:2], dtype=torch.long, device=mm_text_attn_mask.device)
-        mm_attn_mask = torch.cat([mm_vis_attn_mask, mm_text_attn_mask], dim=1)
-
-        mm_input = torch.cat([mm_h_image, mm_h_text], dim=1)
-        h_m = self.multimodal(mm_input, attn_mask=mm_attn_mask)
-        cls_m = h_m[:, 0, :]
-        return self.itm_head(cls_m)
+        h_itm = self.multimodal(
+            torch.cat([mm_h_image, mm_h_text], dim=1),
+            attn_mask=self._build_mm_attn_mask(text, h_image.shape[1]),
+        )
+        return self.itm_head(h_itm[:, 0, :])
 
     def forward_mlm(self, *, text_masked, mlm_labels):
         h_masked_text = self.text(text_masked)
@@ -592,12 +589,8 @@ class FLAVA(nn.Module):
         image_encoding = self.image_projection(cls_i)
         image_encoding = F.normalize(image_encoding, dim=-1)
 
-        # Multimodal attention mask (ignore text padding tokens)
-        mm_text_attn_mask = (text != self.text.config.pad_token_id).long()
-        mm_vis_attn_mask = torch.ones(*h_image.shape[:2], dtype=torch.long, device=mm_text_attn_mask.device)
-        mm_attn_mask = torch.cat([mm_vis_attn_mask, mm_text_attn_mask], dim=1)
-
         # Multimodal inputs
+        mm_attn_mask = self._build_mm_attn_mask(text, h_image.shape[1])
         mm_h_image = self.image_to_mm_projection(h_image)
         mm_h_text = self.text_to_mm_projection(h_text)
         mm_h_masked_text = self.text_to_mm_projection(h_masked_text)
@@ -643,8 +636,7 @@ class FLAVA(nn.Module):
             torch.zeros(mm_neg_t2i.shape[0] + mm_neg_i2t.shape[0], dtype=torch.long, device=mm_pos.device)
         ], dim=0)
 
-
-        # MMM
+        # Masked multimodal modeling (MMM)
         mae_mask_tokens = self.patch_mask_token.repeat(
             h_masked_image.shape[0],
             ids_restore.shape[1] + 1 - h_masked_image.shape[1],
@@ -657,32 +649,37 @@ class FLAVA(nn.Module):
             index=ids_restore.unsqueeze(-1).repeat(1, 1, h_masked_image.shape[2]),
         )  # unshuffle
         image_with_mask_tokens = torch.cat([h_masked_image[:, :1, :], image_with_mask_tokens], dim=1)  # append cls token
+        mm_h_masked_image = self.image_to_mm_projection(image_with_mask_tokens)
 
         if self.use_xmmm:
-            """
-            # Multimodal cross-attention MLM (full images, masked text)
-            mm_mlm_input = torch.cat([mm_h_image, mm_h_masked_text], dim=1)
-            h_m_mlm = self.multimodal(mm_mlm_input, attn_mask=mm_attn_mask)
-            mm_masked_text_pred = h_m_mlm[:, 1 + mm_h_image.shape[1]:, :]
-            mm_mlm_logits = self.mm_mlm_head(self.mm_projection(mm_masked_text_pred[:, 1:, :]))  # remove cls token
+            # (full images, masked text)
+            h_fi_mt = self.multimodal(
+                torch.cat([mm_h_image, mm_h_masked_text], dim=1),
+                attn_mask=mm_attn_mask,
+            )
+            mm_masked_text_out = h_fi_mt[:, 1 + mm_h_image.shape[1]:, :]
+            mm_mlm_logits = self.mm_mlm_head(mm_masked_text_out[:, 1:, :])  # remove cls token
 
-            # Multimodal cross-attention MAE task (masked images, full text)
-
-            mm_image_with_mask_tokens = self.image_to_mm_projection(image_with_mask_tokens)
-            mm_mae_input = torch.cat([mm_image_with_mask_tokens, mm_h_text], dim=1)
-            h_m_mae = self.multimodal(mm_mae_input, attn_mask=mm_attn_mask)
-            mm_masked_patches_pred = h_m_mae[:, 1:mm_image_with_mask_tokens.shape[1] + 1, :]
-            mm_mae_logits = self.mm_mae_head(self.mm_projection(mm_masked_patches_pred[:, 1:, :]))  # remove cls token
-            """
+            # (masked images, full text)
+            h_mi_ft = self.multimodal(
+                torch.cat([mm_h_masked_image, mm_h_text], dim=1),
+                attn_mask=mm_attn_mask,
+            )
+            mm_masked_patches_out = h_mi_ft[:, 1:mm_h_masked_image.shape[1] + 1, :]
+            mm_mae_logits = self.mm_mae_head(mm_masked_patches_out[:, 1:, :])  # remove cls token
         else:
-            mmm_input = torch.cat([mm_h_masked_image, mm_h_masked_text], dim=1)
-            h_mmm = self.multimodal(mm_mmm_input, attn_mask=mm_attn_mask)
+            h_mmm = self.multimodal(
+                torch.cat([mm_h_masked_image, mm_h_masked_text], dim=1),
+                attn_mask=mm_attn_mask,
+            )
+            mm_masked_text_out = h_mmm[:, 1 + mm_h_masked_image.shape[1]:, :]
+            mm_mlm_logits = self.mm_mlm_head(mm_masked_text_out[:, 1:, :])  # remove cls token
+            mm_masked_patches_out = h_mmm[:, 1:mm_h_masked_image.shape[1] + 1, :]
+            mm_mae_logits = self.mm_mae_head(mm_masked_patches_out[:, 1:, :])  # remove cls token
 
-
-        # Product-of-Experts (Hinton '02)
-        # https://aclanthology.org/2021.acl-long.522.pdf
+        # Product-of-Experts (PoE)
         if self.poe_mlm:
-            uni_mlm_logits = self.mlm_head(self.text_projection(h_masked_text[:, 1:, :]))
+            uni_mlm_logits = self.mlm_head(h_masked_text[:, 1:, :])
             assert uni_mlm_logits.shape == mm_mlm_logits.shape
             mm_mlm_logits = mm_mlm_logits + uni_mlm_logits
         if self.poe_mae:
@@ -691,15 +688,17 @@ class FLAVA(nn.Module):
             mm_mae_logits = mm_mae_logits + uni_mae_logits
 
         return {
-            # contrastive outputs
+            # contrastive
             'image_features': image_encoding,
             'text_features': text_encoding,
             'logit_scale': self.logit_scale.exp(),
 
-            # multimodal outputs
+            # image-text matching
             'itm_logits': itm_logits,
-            # 'mm_mlm_logits': mm_mlm_logits,
-            # 'mm_mae_logits': mm_mae_logits,
+
+            # masked multimodal
+            'mm_mlm_logits': mm_mlm_logits,
+            'mm_mae_logits': mm_mae_logits,
 
             # labels
             'mlm_labels': mlm_labels[:, 1:],  # remove cls token from labels
