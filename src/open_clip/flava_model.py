@@ -248,7 +248,8 @@ class MultimodalTransformer(nn.Module):
         x = torch.cat(
             [self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device),
              x], dim=1)  # shape = [*, 1 + context_length, width]
-        x = x + self.positional_embedding.to(x.dtype)
+        t = x.shape[1]
+        x = x + self.positional_embedding[:t].to(x.dtype)
         x = self.ln_pre(x)
 
         # always attend to CLS_M token
@@ -431,6 +432,7 @@ class FLAVA(nn.Module):
 
         vision_cfg = FLAVAVisionCfg(**vision_cfg) if isinstance(vision_cfg, dict) else vision_cfg
         self.visual = _build_vision_tower(embed_dim, vision_cfg, quick_gelu, cast_dtype)
+        self.flip_mask_ratio = vision_cfg.patch_dropout
         grid_size = vision_cfg.image_size // vision_cfg.patch_size
         text_cfg = FLAVATextCfg(**text_cfg) if isinstance(text_cfg, dict) else text_cfg
         self.text = _build_text_tower(embed_dim, text_cfg, quick_gelu, cast_dtype)
@@ -578,7 +580,7 @@ class FLAVA(nn.Module):
     def forward_flava(self, *, image, text, text_masked, mlm_labels):
         h_text = self.text(text)
         h_masked_text = self.text(text_masked)
-        h_image, _, _ = self.visual(image, mask_ratio=0)
+        h_image, _, _ = self.visual(image, mask_ratio=self.flip_mask_ratio)
         h_masked_image, mae_mask, ids_restore = self.visual(image, mask_ratio=self.mae_mask_ratio)
 
         # CLIP
@@ -650,6 +652,8 @@ class FLAVA(nn.Module):
         )  # unshuffle
         image_with_mask_tokens = torch.cat([h_masked_image[:, :1, :], image_with_mask_tokens], dim=1)  # append cls token
         mm_h_masked_image = self.image_to_mm_projection(image_with_mask_tokens)
+        mm_masked_attn_mask = self._build_mm_attn_mask(text, mm_h_masked_image.shape[1])  # TODO: remove this if FLIP is bad
+
 
         if self.use_xmmm:
             # (full images, masked text)
@@ -663,14 +667,14 @@ class FLAVA(nn.Module):
             # (masked images, full text)
             h_mi_ft = self.multimodal(
                 torch.cat([mm_h_masked_image, mm_h_text], dim=1),
-                attn_mask=mm_attn_mask,
+                attn_mask=mm_masked_attn_mask,
             )
             mm_masked_patches_out = h_mi_ft[:, 1:mm_h_masked_image.shape[1] + 1, :]
             mm_mae_logits = self.mm_mae_head(mm_masked_patches_out[:, 1:, :])  # remove cls token
         else:
             h_mmm = self.multimodal(
                 torch.cat([mm_h_masked_image, mm_h_masked_text], dim=1),
-                attn_mask=mm_attn_mask,
+                attn_mask=mm_masked_attn_mask,
             )
             mm_masked_text_out = h_mmm[:, 1 + mm_h_masked_image.shape[1]:, :]
             mm_mlm_logits = self.mm_mlm_head(mm_masked_text_out[:, 1:, :])  # remove cls token
