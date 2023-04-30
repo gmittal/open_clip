@@ -469,6 +469,12 @@ def parse_args(args):
         help="MLM masking probability when training FLAVA."
     )
     parser.add_argument(
+        "--flava-whole-word-mlm",
+        default=False,
+        action="store_true",
+        help="If True, use whole word masking for MLM."
+    )
+    parser.add_argument(
         "--flava-mae-norm-pix-loss",
         type=bool,
         default=False,

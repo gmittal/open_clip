@@ -678,7 +678,11 @@ def get_data(args, preprocess_fns, epoch=0, tokenizer=None, collate_fn=None):
             "train",
             epoch=epoch,
             tokenizer=unimodal_tokenizer,
-            collate_fn=get_mlm_collate(unimodal_tokenizer, args.flava_mlm_prob),
+            collate_fn=get_mlm_collate(
+                hf_tokenizer=unimodal_tokenizer,
+                mlm_prob=args.flava_mlm_prob,
+                whole_word=False,
+            ),
         )
 
     if is_flava and args.flava_unimodal_mae:

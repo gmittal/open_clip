@@ -348,7 +348,7 @@ def main(args):
     tokenizer = get_tokenizer(args.model)
     collate_fn = None
     if args.model.startswith('flava'):
-        collate_fn = get_flava_collate(tokenizer, mlm_prob=args.flava_mlm_prob)
+        collate_fn = get_flava_collate(hf_tokenizer=tokenizer, mlm_prob=args.flava_mlm_prob, whole_word=args.flava_whole_word_mlm)
     data = get_data(args, (preprocess_train, preprocess_val), epoch=start_epoch, tokenizer=tokenizer, collate_fn=collate_fn)
     assert len(data), 'At least one train or eval dataset must be specified.'
 
