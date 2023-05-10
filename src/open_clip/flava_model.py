@@ -1,14 +1,19 @@
+import math
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple, Union
 
 import numpy as np
 import torch
+import torch.backends.cuda
 import torch.nn.functional as F
 from torch import nn
 
 from .model import _build_text_tower
 from .transformer import LayerNorm, Transformer, VisionTransformer
 from .transformer import LayerNormFp32, LayerNorm, QuickGELU, VisionTransformer
+
+torch.backends.cuda.enable_flash_sdp(True)
+torch.backends.cuda.enable_mem_efficient_sdp(True)
 
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
@@ -494,6 +499,10 @@ class FLAVA(nn.Module):
         self.text_projection = nn.Linear(embed_dim, embed_dim)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
+        # Compile
+        # self.text = torch.compile(self.text)
+        # self.multimodal = torch.compile(self.multimodal)
+
         self.init_parameters()
 
     def init_parameters(self):
@@ -550,8 +559,8 @@ class FLAVA(nn.Module):
         h_masked_text = self.text(text_masked)
         mlm_logits = self.mlm_head(h_masked_text[:, 1:, :])
         return {
-            'mlm_logits': mlm_logits,
-            'mlm_labels': mlm_labels[:, 1:],  # remove cls token from labels
+            'unimodal_mlm_logits': mlm_logits,
+            'unimodal_mlm_labels': mlm_labels[:, 1:],  # remove cls token from labels
         }
 
     def forward_mae(self, *, image):
@@ -572,9 +581,9 @@ class FLAVA(nn.Module):
         mae_logits = self.mae_decoder(image_with_mask_tokens)
 
         return {
-            'mae_logits': mae_logits,
-            'mae_mask': mae_mask,
-            'image': image,
+            'unimodal_mae_logits': mae_logits,
+            'unimodal_mae_mask': mae_mask,
+            'unimodal_image': image,
         }
 
     def forward_flava(self, *, image, text, text_masked, mlm_labels):
@@ -691,6 +700,10 @@ class FLAVA(nn.Module):
             assert uni_mae_logits.shape == mm_mae_logits.shape
             mm_mae_logits = mm_mae_logits + uni_mae_logits
 
+        # Clamp logit scale
+        with torch.no_grad():
+            self.logit_scale.data.clamp_(0, math.log(100))
+
         return {
             # contrastive
             'image_features': image_encoding,
@@ -717,32 +730,39 @@ class FLAVA(nn.Module):
         image=None,
         text=None,
         text_masked=None,
+        mlm_labels=None,  # passthrough
 
-        # passthrough
-        mlm_labels=None,
-
-        # unimodal flags
-        unimodal_mae=False,
-        unimodal_mlm=False,
+        unimodal_image=None,
+        unimodal_text_masked=None,
+        unimodal_mlm_labels=None,  # passthrough
 
         output_dict=True,
     ):
+        out_dict = {}
+
+        unimodal_mlm = unimodal_text_masked is not None and unimodal_mlm_labels is not None
         if unimodal_mlm:
-            assert text_masked is not None and mlm_labels is not None
-            return self.forward_mlm(
-                text_masked=text_masked,
-                mlm_labels=mlm_labels,
+            mlm_dict = self.forward_mlm(
+                text_masked=unimodal_text_masked,
+                mlm_labels=unimodal_mlm_labels,
             )
-        elif unimodal_mae:
-            assert image is not None
-            return self.forward_mae(image=image)
-        else:
-            assert image is not None and \
-                   text is not None and \
-                   mlm_labels is not None
-            return self.forward_flava(
-                image=image,
-                text=text,
-                text_masked=text_masked,
-                mlm_labels=mlm_labels,
-            )
+            out_dict.update(mlm_dict)
+
+        unimodal_mae = unimodal_image is not None
+        if unimodal_mae:
+            mae_dict = self.forward_mae(image=unimodal_image)
+            out_dict.update(mae_dict)
+
+        # multimodal
+        assert image is not None and \
+                text is not None and \
+                mlm_labels is not None
+        mm_dict = self.forward_flava(
+            image=image,
+            text=text,
+            text_masked=text_masked,
+            mlm_labels=mlm_labels,
+        )
+        out_dict.update(mm_dict)
+        return out_dict
+

@@ -1,3 +1,4 @@
+import functools
 import glob
 import logging
 import os
@@ -11,6 +12,20 @@ import numpy as np
 import torch
 from torch import optim
 from torch.cuda.amp import GradScaler
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    CPUOffload,
+    MixedPrecision,
+    ShardingStrategy,
+    BackwardPrefetch,
+)
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper,
+    CheckpointImpl,
+    apply_activation_checkpointing,
+)
+from transformers.models.roberta.modeling_roberta import RobertaLayer, RobertaModel
 
 try:
     import wandb
@@ -29,6 +44,12 @@ except ImportError:
 
 from open_clip import create_model_and_transforms, trace_model, get_tokenizer, create_loss
 from open_clip.flava_data import get_flava_collate
+from open_clip.flava_model import (
+    MaskedVisionTransformer,
+    MaskedVisionDecoder,
+    MultimodalTransformer,
+)
+from open_clip.transformer import ResidualAttentionBlock
 from training.data import get_data
 from training.distributed import is_master, init_distributed_device, broadcast_object
 from training.logger import setup_logging
@@ -288,7 +309,43 @@ def main(args):
             ddp_args['static_graph'] = True
         if args.ddp_find_unused_parameters:
             ddp_args['find_unused_parameters'] = True
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
+        # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
+
+        flava_auto_wrapper_policy = functools.partial(
+            transformer_auto_wrap_policy,
+            transformer_layer_cls={
+                RobertaLayer,
+                ResidualAttentionBlock,
+                # MaskedVisionTransformer,
+                # MaskedVisionDecoder,
+                # RobertaModel,
+                # MultimodalTransformer,
+            }
+        )
+        # TODO: check that amp and ShardedGradScaler are necessary
+        bf16_mp = MixedPrecision(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.bfloat16,
+            buffer_dtype=torch.bfloat16,
+        )
+        model = FSDP(
+            model,
+            auto_wrap_policy=flava_auto_wrapper_policy,
+            mixed_precision=bf16_mp,
+            device_id=torch.cuda.current_device(),
+            backward_prefetch = BackwardPrefetch.BACKWARD_PRE,
+            limit_all_gathers=True,
+            # use_orig_params=True, # required by torch.compile
+        )
+        non_reentrant_wrapper = functools.partial(
+            checkpoint_wrapper,
+            offload_to_cpu=False,
+            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+        )
+        check_fn = lambda submodule: isinstance(submodule, ResidualAttentionBlock) or isinstance(submodule, RobertaLayer)
+        apply_activation_checkpointing(
+            model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn
+        )
 
         if args.distill:
             dist_model = torch.nn.parallel.DistributedDataParallel(dist_model, device_ids=[device], **ddp_args)

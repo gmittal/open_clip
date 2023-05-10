@@ -73,7 +73,7 @@ class HFImageDataset(Dataset):
 
     def __getitem__(self, idx):
         image = self.transforms(self.df[idx][self.image_key])
-        return {'image': image}
+        return {'unimodal_image': image}
 
 
 class CsvDataset(Dataset):

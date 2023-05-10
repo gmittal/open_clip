@@ -333,8 +333,27 @@ class FlavaLoss(ClipLoss):
         itm_logits,
         itm_labels,
 
+        # unimodal text
+        unimodal_mlm_logits=None,
+        unimodal_mlm_labels=None,
+
+        # unimodal image
+        unimodal_mae_logits=None,
+        unimodal_mae_mask=None,
+        unimodal_image=None,
+
         output_dict=False,
     ):
+        do_uni_mlm = unimodal_mlm_logits is not None and unimodal_mlm_labels is not None
+        do_uni_mae = unimodal_mae_logits is not None and unimodal_mae_mask is not None \
+                        and unimodal_image is not None
+        # unimodal
+        if do_uni_mlm:
+            uni_mlm = self.forward_mlm(unimodal_mlm_logits, unimodal_mlm_labels)["mlm_loss"]
+        if do_uni_mae:
+            uni_mae = self.forward_mae(unimodal_image, unimodal_mae_mask, unimodal_mae_logits)["mae_loss"]
+
+        # multimodal
         clip_loss = super().forward(image_features, text_features, logit_scale)
         itm_loss = self.itm_loss(itm_logits, itm_labels)
         mm_mlm_loss = self.mlm_loss(mm_mlm_logits, mlm_labels)
@@ -346,10 +365,21 @@ class FlavaLoss(ClipLoss):
         mm_mae_loss = self.mae_loss_weight * mm_mae_loss
 
         if output_dict:
-            return {
+            out_dict = {
                 "contrastive_loss": clip_loss,
                 "itm_loss": itm_loss,
                 "mm_mlm_loss": mm_mlm_loss,
                 "mm_mae_loss": mm_mae_loss,
             }
-        return clip_loss, itm_loss, mm_mlm_loss, mm_mae_loss
+            if do_uni_mlm:
+                out_dict["unimodal_mlm"] = uni_mlm
+            if do_uni_mae:
+                out_dict["unimodal_mae"] = uni_mae
+            return out_dict
+
+        out_list = [clip_loss, itm_loss, mm_mlm_loss, mm_mae_loss]
+        if do_uni_mlm:
+            out_list.append(uni_mlm)
+        if do_uni_mae:
+            out_list.append(uni_mae)
+        return out_list

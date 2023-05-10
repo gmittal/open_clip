@@ -198,6 +198,7 @@ def create_model(
 
         if is_flava:
             model = FLAVA(**model_cfg, cast_dtype=cast_dtype)
+            # model = torch.compile(model)
         elif custom_text:
             if is_hf_model:
                 model_cfg['text_cfg']['hf_model_pretrained'] = pretrained_hf

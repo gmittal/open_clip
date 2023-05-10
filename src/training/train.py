@@ -88,7 +88,6 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     cast_dtype = get_cast_dtype(args.precision)
     is_flava = args.model.startswith('flava')
 
-
     model.train()
     if args.distill:
         dist_model.eval()
@@ -145,29 +144,12 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         optimizer.zero_grad()
 
         if args.accum_freq == 1:
-            no_grad_sync = model.no_sync if args.distributed else contextlib.nullcontext
             losses_dict = {}
-
-            # FLAVA unimodal forward passes
-            if is_flava and args.flava_unimodal_mlm:
-                with no_grad_sync():
-                    with autocast():
-                        mlm_out = model(**mlm_batch, unimodal_mlm=True)
-                        mlm_losses = loss.forward_mlm(**mlm_out)
-                        total_mlm_loss = sum(mlm_losses.values())
-                        losses_dict["unimodal_mlm_loss"] = total_mlm_loss
-                    backward(total_mlm_loss, scaler)
-
             if is_flava and args.flava_unimodal_mae:
-                with no_grad_sync():
-                    with autocast():
-                        mae_out = model(**mae_batch, unimodal_mae=True)
-                        mae_losses = loss.forward_mae(**mae_out)
-                        total_mae_loss = sum(mae_losses.values())
-                        losses_dict["unimodal_mae_loss"] = total_mae_loss
-                    backward(total_mae_loss, scaler)
+                batch.update(mae_batch)
+            if is_flava and args.flava_unimodal_mlm:
+                batch.update(mlm_batch)
 
-            # Multimodal forward pass
             with autocast():
                 model_out = model(**batch, output_dict=True)
                 assert isinstance(model_out, dict)
@@ -247,9 +229,10 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         if args.accum_freq > 1:
             accum_images, accum_texts, accum_features = [], [], {}
 
-        # Note: we clamp to 4.6052 = ln(100), as in the original paper.
-        with torch.no_grad():
-            unwrap_model(model).logit_scale.clamp_(0, math.log(100))
+        if not is_flava:
+            # Note: we clamp to 4.6052 = ln(100), as in the original paper.
+            with torch.no_grad():
+                unwrap_model(model).logit_scale.clamp_(0, math.log(100))
 
         batch_time_m.update(time.time() - end)
         end = time.time()

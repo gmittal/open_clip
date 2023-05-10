@@ -243,8 +243,8 @@ def get_mlm_collate(hf_tokenizer, mlm_prob=0.15, whole_word=False):
     def collate(example_list):
         mlm_input = mlm_collator([example["text"] for example in example_list])
         return {
-            "text_masked": mlm_input["input_ids"],
-            "mlm_labels": mlm_input["labels"],
+            "unimodal_text_masked": mlm_input["input_ids"],
+            "unimodal_mlm_labels": mlm_input["labels"],
         }
 
     return collate
