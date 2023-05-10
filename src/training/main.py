@@ -19,6 +19,7 @@ from torch.distributed.fsdp import (
     ShardingStrategy,
     BackwardPrefetch,
 )
+from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
@@ -316,13 +317,8 @@ def main(args):
             transformer_layer_cls={
                 RobertaLayer,
                 ResidualAttentionBlock,
-                # MaskedVisionTransformer,
-                # MaskedVisionDecoder,
-                # RobertaModel,
-                # MultimodalTransformer,
             }
         )
-        # TODO: check that amp and ShardedGradScaler are necessary
         bf16_mp = MixedPrecision(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.bfloat16,
@@ -333,9 +329,7 @@ def main(args):
             auto_wrap_policy=flava_auto_wrapper_policy,
             mixed_precision=bf16_mp,
             device_id=torch.cuda.current_device(),
-            backward_prefetch = BackwardPrefetch.BACKWARD_PRE,
             limit_all_gathers=True,
-            # use_orig_params=True, # required by torch.compile
         )
         non_reentrant_wrapper = functools.partial(
             checkpoint_wrapper,
@@ -378,7 +372,7 @@ def main(args):
             hvd.broadcast_parameters(model.state_dict(), root_rank=0)
             hvd.broadcast_optimizer_state(optimizer, root_rank=0)
 
-        scaler = GradScaler() if args.precision == "amp" else None
+        scaler = ShardedGradScaler() #GradScaler() if args.precision == "amp" else None
 
     # optionally resume from a checkpoint
     start_epoch = 0
