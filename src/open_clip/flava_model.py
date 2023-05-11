@@ -160,8 +160,9 @@ class MaskedVisionTransformer(VisionTransformer):
 
 class MaskedVisionDecoder(VisionTransformer):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, input_dim :int = 512, **kwargs):
         super().__init__(*args, **kwargs)
+        self.decoder_embed = nn.Linear(input_dim, kwargs['width'], bias=True)
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -173,6 +174,7 @@ class MaskedVisionDecoder(VisionTransformer):
         torch.nn.init.normal_(self.class_embedding, std=.02)
 
     def forward(self, x):
+        x = self.decoder_embed(x)
         x = x + self.positional_embedding.to(x.dtype)
         x = self.ln_pre(x)
         x = x.permute(1, 0, 2)  # NLD -> LND
@@ -374,6 +376,7 @@ def _build_vision_tower(
 
 
 def _build_vision_mae_decoder(
+        embed_dim: int,
         vision_cfg: FLAVAVisionCfg,
         quick_gelu: bool = False,
         cast_dtype: Optional[torch.dtype] = None
@@ -384,6 +387,7 @@ def _build_vision_mae_decoder(
     visual = MaskedVisionDecoder(
         image_size=vision_cfg.image_size,
         patch_size=vision_cfg.patch_size,
+        input_dim=embed_dim,
         width=vision_cfg.mae_decoder_width,
         layers=vision_cfg.mae_decoder_layers,
         heads=vision_cfg.mae_decoder_heads,
@@ -452,8 +456,8 @@ class FLAVA(nn.Module):
 
         # unimodal MAE
         self.mae_mask_ratio = vision_cfg.mae_mask_ratio
-        self.patch_mask_token = nn.Parameter(vision_cfg.mae_decoder_width ** -0.5 * torch.randn(vision_cfg.mae_decoder_width))
-        self.mae_decoder = _build_vision_mae_decoder(vision_cfg, quick_gelu, cast_dtype)
+        self.patch_mask_token = nn.Parameter(embed_dim ** -0.5 * torch.randn(embed_dim))
+        self.mae_decoder = _build_vision_mae_decoder(embed_dim, vision_cfg, quick_gelu, cast_dtype)
 
         # Multimodal encoder
         multimodal_cfg = FLAVAMultimodalCfg(**multimodal_cfg) if isinstance(multimodal_cfg, dict) else multimodal_cfg
