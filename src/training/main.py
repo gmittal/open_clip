@@ -11,14 +11,11 @@ from datetime import datetime
 import numpy as np
 import torch
 from torch import optim
-from torch.cuda.amp import GradScaler
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
-    CPUOffload,
     MixedPrecision,
-    ShardingStrategy,
-    BackwardPrefetch,
 )
+from torch.distributed.fsdp.api import StateDictType, FullStateDictConfig, FullOptimStateDictConfig
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -26,7 +23,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointImpl,
     apply_activation_checkpointing,
 )
-from transformers.models.roberta.modeling_roberta import RobertaLayer, RobertaModel
+from transformers.models.roberta.modeling_roberta import RobertaLayer
 
 try:
     import wandb
@@ -327,7 +324,7 @@ def main(args):
         model = FSDP(
             model,
             auto_wrap_policy=flava_auto_wrapper_policy,
-            mixed_precision=bf16_mp,
+            # mixed_precision=bf16_mp,
             device_id=torch.cuda.current_device(),
             limit_all_gathers=True,
         )
@@ -337,9 +334,9 @@ def main(args):
             checkpoint_impl=CheckpointImpl.NO_REENTRANT,
         )
         check_fn = lambda submodule: isinstance(submodule, ResidualAttentionBlock) or isinstance(submodule, RobertaLayer)
-        apply_activation_checkpointing(
-            model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn
-        )
+        # apply_activation_checkpointing(
+        #     model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn
+        # )
 
         if args.distill:
             dist_model = torch.nn.parallel.DistributedDataParallel(dist_model, device_ids=[device], **ddp_args)
@@ -394,6 +391,13 @@ def main(args):
             # loading a bare (model only) checkpoint for fine-tune or evaluation
             model.load_state_dict(checkpoint)
             logging.info(f"=> loaded checkpoint '{args.resume}' (epoch {start_epoch})")
+
+    # FSDP.set_state_dict_type(
+    #     model,
+    #     StateDictType.FULL_STATE_DICT,
+    #     FullStateDictConfig(rank0_only=True, offload_to_cpu=True),
+    #     FullOptimStateDictConfig(rank0_only=True, offload_to_cpu=True),
+    # )
 
     # initialize datasets
     tokenizer = get_tokenizer(args.model)
@@ -473,29 +477,29 @@ def main(args):
                 "epoch": completed_epoch,
                 "name": args.name,
                 "state_dict": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
+                # "optimizer": FSDP.optim_state_dict(model, optimizer),
             }
             if scaler is not None:
                 checkpoint_dict["scaler"] = scaler.state_dict()
+            if is_master(args):
+                if completed_epoch == args.epochs or (
+                    args.save_frequency > 0 and (completed_epoch % args.save_frequency) == 0
+                ):
+                    torch.save(
+                        checkpoint_dict,
+                        os.path.join(args.checkpoint_path, f"epoch_{completed_epoch}.pt"),
+                    )
+                if args.delete_previous_checkpoint:
+                    previous_checkpoint = os.path.join(args.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
+                    if os.path.exists(previous_checkpoint):
+                        os.remove(previous_checkpoint)
 
-            if completed_epoch == args.epochs or (
-                args.save_frequency > 0 and (completed_epoch % args.save_frequency) == 0
-            ):
-                torch.save(
-                    checkpoint_dict,
-                    os.path.join(args.checkpoint_path, f"epoch_{completed_epoch}.pt"),
-                )
-            if args.delete_previous_checkpoint:
-                previous_checkpoint = os.path.join(args.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
-                if os.path.exists(previous_checkpoint):
-                    os.remove(previous_checkpoint)
-
-            if args.save_most_recent:
-                # try not to corrupt the latest checkpoint if save fails
-                tmp_save_path = os.path.join(args.checkpoint_path, "tmp.pt")
-                latest_save_path = os.path.join(args.checkpoint_path, LATEST_CHECKPOINT_NAME)
-                torch.save(checkpoint_dict, tmp_save_path)
-                os.replace(tmp_save_path, latest_save_path)
+                if args.save_most_recent:
+                    # try not to corrupt the latest checkpoint if save fails
+                    tmp_save_path = os.path.join(args.checkpoint_path, "tmp.pt")
+                    latest_save_path = os.path.join(args.checkpoint_path, LATEST_CHECKPOINT_NAME)
+                    torch.save(checkpoint_dict, tmp_save_path)
+                    os.replace(tmp_save_path, latest_save_path)
 
     if args.wandb and is_master(args):
         wandb.finish()

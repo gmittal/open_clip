@@ -123,6 +123,9 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         dtypes = {'image': cast_dtype}
         batch = Batch(**batch).to(device=device, non_blocking=True, dtypes=dtypes)
 
+        if i == 0:
+            print(batch.keys())
+
         # FLAVA unimodal batches
         if is_flava and args.flava_unimodal_mae:
             try:
@@ -320,7 +323,7 @@ def evaluate(model, data, epoch, args, tb_writer=None):
                 batch = Batch(**batch).to(device=device, non_blocking=True, dtypes={'image': cast_dtype})
 
                 with autocast():
-                    output = model(**batch, output_dict=True)
+                    output = model(**batch, clip_features_only=True, output_dict=True)
                     # features are accumulated in CPU tensors, otherwise GPU memory exhausted quickly
                     # however, system RAM is easily exceeded and compute time becomes problematic
                     image_features, text_features, logit_scale = output['image_features'], \

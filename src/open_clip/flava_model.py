@@ -590,7 +590,7 @@ class FLAVA(nn.Module):
             'unimodal_image': image,
         }
 
-    def forward_flava(self, *, image, text, text_masked, mlm_labels):
+    def forward_flava(self, *, image, text, text_masked, mlm_labels, clip_features_only):
         h_text = self.text(text)
         h_masked_text = self.text(text_masked)
         h_image, _, _ = self.visual(image, mask_ratio=self.flip_mask_ratio)
@@ -603,6 +603,13 @@ class FLAVA(nn.Module):
         cls_i = h_image[:, 0, :]
         image_encoding = self.image_projection(cls_i)
         image_encoding = F.normalize(image_encoding, dim=-1)
+
+        if clip_features_only:
+            return {
+                'image_features': image_encoding,
+                'text_features': text_encoding,
+                'logit_scale': self.logit_scale.exp(),
+            }
 
         # Multimodal inputs
         mm_attn_mask = self._build_mm_attn_mask(text, h_image.shape[1])
@@ -623,7 +630,16 @@ class FLAVA(nn.Module):
 
         # ITM: select a negative image for each text
         weights_t2i = torch.softmax(logits.T, dim=1).fill_diagonal_(0)
-        idx_t2i = torch.multinomial(weights_t2i, 1).view(-1)
+
+        try:
+            idx_t2i = torch.multinomial(weights_t2i, 1).view(-1)
+        except:
+            print(self.logit_scale)
+            print(image_encoding)
+            print(text_encoding)
+            print(text)
+            print(image)
+
         idx_t2i = idx_t2i[: local_bs // 2]
         mm_neg_h_image = torch.index_select(mm_h_image, 0, idx_t2i)
         mm_pos_h_text = torch.index_select(mm_h_text, 0, pos_idx)
@@ -740,6 +756,7 @@ class FLAVA(nn.Module):
         unimodal_text_masked=None,
         unimodal_mlm_labels=None,  # passthrough
 
+        clip_features_only=False,
         output_dict=True,
     ):
         out_dict = {}
@@ -760,12 +777,14 @@ class FLAVA(nn.Module):
         # multimodal
         assert image is not None and \
                 text is not None and \
+                text_masked is not None and \
                 mlm_labels is not None
         mm_dict = self.forward_flava(
             image=image,
             text=text,
             text_masked=text_masked,
             mlm_labels=mlm_labels,
+            clip_features_only=False,
         )
         out_dict.update(mm_dict)
         return out_dict
