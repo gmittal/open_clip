@@ -322,7 +322,7 @@ def evaluate(model, data, epoch, args, tb_writer=None):
                 batch = Batch(**batch).to(device=device, non_blocking=True, dtypes={'image': cast_dtype})
 
                 with autocast():
-                    output = model(**batch, clip_features_only=True, output_dict=True)
+                    output = model(**batch, output_dict=True)
                     # features are accumulated in CPU tensors, otherwise GPU memory exhausted quickly
                     # however, system RAM is easily exceeded and compute time becomes problematic
                     image_features, text_features, logit_scale = output['image_features'], \
