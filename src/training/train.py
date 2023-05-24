@@ -123,9 +123,6 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         dtypes = {'image': cast_dtype}
         batch = Batch(**batch).to(device=device, non_blocking=True, dtypes=dtypes)
 
-        if i == 0:
-            print(batch.keys())
-
         # FLAVA unimodal batches
         if is_flava and args.flava_unimodal_mae:
             try:
@@ -232,8 +229,10 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         if args.accum_freq > 1:
             accum_images, accum_texts, accum_features = [], [], {}
 
-        if not is_flava:
-            # Note: we clamp to 4.6052 = ln(100), as in the original paper.
+        # Note: we clamp to 4.6052 = ln(100), as in the original paper.
+        if args.fsdp:
+            model(clamp_logit_scale_to=math.log(100))
+        else:
             with torch.no_grad():
                 unwrap_model(model).logit_scale.clamp_(0, math.log(100))
 
@@ -297,7 +296,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
 def evaluate(model, data, epoch, args, tb_writer=None):
     metrics = {}
-    if not is_master(args):
+    if not is_master(args) and not args.fsdp:
         return metrics
     device = torch.device(args.device)
     model.eval()
@@ -372,24 +371,25 @@ def evaluate(model, data, epoch, args, tb_writer=None):
     if not metrics:
         return metrics
 
-    logging.info(
-        f"Eval Epoch: {epoch} "
-        + "\t".join([f"{k}: {round(v, 4):.4f}" for k, v in metrics.items()])
-    )
+    if is_master(args):
+        logging.info(
+            f"Eval Epoch: {epoch} "
+            + "\t".join([f"{k}: {round(v, 4):.4f}" for k, v in metrics.items()])
+        )
 
-    if args.save_logs:
-        for name, val in metrics.items():
-            if tb_writer is not None:
-                tb_writer.add_scalar(f"val/{name}", val, epoch)
+        if args.save_logs:
+            for name, val in metrics.items():
+                if tb_writer is not None:
+                    tb_writer.add_scalar(f"val/{name}", val, epoch)
 
-        with open(os.path.join(args.checkpoint_path, "results.jsonl"), "a+") as f:
-            f.write(json.dumps(metrics))
-            f.write("\n")
+            with open(os.path.join(args.checkpoint_path, "results.jsonl"), "a+") as f:
+                f.write(json.dumps(metrics))
+                f.write("\n")
 
-    if args.wandb:
-        assert wandb is not None, 'Please install wandb.'
-        for name, val in metrics.items():
-            wandb.log({f"val/{name}": val, 'epoch': epoch})
+        if args.wandb:
+            assert wandb is not None, 'Please install wandb.'
+            for name, val in metrics.items():
+                wandb.log({f"val/{name}": val, 'epoch': epoch})
 
     return metrics
 

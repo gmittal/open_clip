@@ -590,7 +590,7 @@ class FLAVA(nn.Module):
             'unimodal_image': image,
         }
 
-    def forward_flava(self, *, image, text, text_masked, mlm_labels, clip_features_only):
+    def forward_flava(self, *, image, text, text_masked, mlm_labels):
         h_text = self.text(text)
         h_masked_text = self.text(text_masked)
         h_image, _, _ = self.visual(image, mask_ratio=self.flip_mask_ratio)
@@ -603,13 +603,6 @@ class FLAVA(nn.Module):
         cls_i = h_image[:, 0, :]
         image_encoding = self.image_projection(cls_i)
         image_encoding = F.normalize(image_encoding, dim=-1)
-
-        if clip_features_only:
-            return {
-                'image_features': image_encoding,
-                'text_features': text_encoding,
-                'logit_scale': self.logit_scale.exp(),
-            }
 
         # Multimodal inputs
         mm_attn_mask = self._build_mm_attn_mask(text, h_image.shape[1])
@@ -630,16 +623,7 @@ class FLAVA(nn.Module):
 
         # ITM: select a negative image for each text
         weights_t2i = torch.softmax(logits.T, dim=1).fill_diagonal_(0)
-
-        try:
-            idx_t2i = torch.multinomial(weights_t2i, 1).view(-1)
-        except:
-            print(self.logit_scale)
-            print(image_encoding)
-            print(text_encoding)
-            print(text)
-            print(image)
-
+        idx_t2i = torch.multinomial(weights_t2i, 1).view(-1)
         idx_t2i = idx_t2i[: local_bs // 2]
         mm_neg_h_image = torch.index_select(mm_h_image, 0, idx_t2i)
         mm_pos_h_text = torch.index_select(mm_h_text, 0, pos_idx)
@@ -720,10 +704,6 @@ class FLAVA(nn.Module):
             assert uni_mae_logits.shape == mm_mae_logits.shape
             mm_mae_logits = mm_mae_logits + uni_mae_logits
 
-        # Clamp logit scale
-        with torch.no_grad():
-            self.logit_scale.data.clamp_(0, math.log(100))
-
         return {
             # contrastive
             'image_features': image_encoding,
@@ -756,10 +736,23 @@ class FLAVA(nn.Module):
         unimodal_text_masked=None,
         unimodal_mlm_labels=None,  # passthrough
 
-        clip_features_only=False,
+        clamp_logit_scale_to=None,
+        image_only=False,
+        text_only=False,
         output_dict=True,
     ):
         out_dict = {}
+
+        if image_only:
+            return self.encode_image(image, normalize=True)
+
+        if text_only:
+            return self.encode_text(text, normalize=True)
+
+        if clamp_logit_scale_to is not None:
+            with torch.no_grad():
+                self.logit_scale.data.clamp_(0, clamp_logit_scale_to)
+                return {"logit_scale": self.logit_scale.exp()}
 
         unimodal_mlm = unimodal_text_masked is not None and unimodal_mlm_labels is not None
         if unimodal_mlm:
@@ -784,7 +777,6 @@ class FLAVA(nn.Module):
             text=text,
             text_masked=text_masked,
             mlm_labels=mlm_labels,
-            clip_features_only=False,
         )
         out_dict.update(mm_dict)
         return out_dict

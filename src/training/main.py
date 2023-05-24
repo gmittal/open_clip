@@ -11,13 +11,14 @@ from datetime import datetime
 import numpy as np
 import torch
 from torch import optim
+from torch.cuda.amp import GradScaler
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     MixedPrecision,
 )
 from torch.distributed.fsdp.api import StateDictType, FullStateDictConfig, FullOptimStateDictConfig
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy, ModuleWrapPolicy
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
     CheckpointImpl,
@@ -268,6 +269,9 @@ def main(args):
             precision=args.precision,
             output_dict=True,
         )
+    # Prepare parameters to decay
+    exclude = lambda n, p: p.ndim < 2 or "bn" in n or "ln" in n or "bias" in n or 'logit_scale' in n
+    parameters_to_decay = set(n for n, p in model.named_parameters() if not exclude(n,p))
 
     random_seed(args.seed, args.rank)
 
@@ -301,45 +305,81 @@ def main(args):
     if args.distributed and not args.horovod:
         if args.use_bn_sync:
             model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        ddp_args = {}
-        if args.ddp_static_graph:
-            # this doesn't exist in older PyTorch, arg only added if enabled
-            ddp_args['static_graph'] = True
-        if args.ddp_find_unused_parameters:
-            ddp_args['find_unused_parameters'] = True
-        # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
-
-        flava_auto_wrapper_policy = functools.partial(
-            transformer_auto_wrap_policy,
-            transformer_layer_cls={
-                RobertaLayer,
-                ResidualAttentionBlock,
+        if args.fsdp:
+            if is_master(args):
+                logging.info(f"Before FSDP number of params: {sum(p.numel() for p in model.parameters())}")
+                logging.info(f"Before FSDP memory allocated: {torch.cuda.memory_allocated()/1024**3:.4} GB")
+            type_name_to_class = {
+                "amp": torch.float16,
+                "amp_bf16": torch.bfloat16,
+                "amp_bfloat16": torch.bfloat16,
+                "fp16":  torch.float16,
+                "fp32": torch.float32,
             }
-        )
-        bf16_mp = MixedPrecision(
-            param_dtype=torch.bfloat16,
-            reduce_dtype=torch.bfloat16,
-            buffer_dtype=torch.bfloat16,
-        )
-        model = FSDP(
-            model,
-            auto_wrap_policy=flava_auto_wrapper_policy,
-            # mixed_precision=bf16_mp,
-            device_id=torch.cuda.current_device(),
-            limit_all_gathers=True,
-        )
-        non_reentrant_wrapper = functools.partial(
-            checkpoint_wrapper,
-            offload_to_cpu=False,
-            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-        )
-        check_fn = lambda submodule: isinstance(submodule, ResidualAttentionBlock) or isinstance(submodule, RobertaLayer)
-        # apply_activation_checkpointing(
-        #     model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn
-        # )
+            mixed_precision = MixedPrecision(
+                param_dtype=type_name_to_class["amp_bf16"],
+                reduce_dtype=type_name_to_class["amp_bf16"],
+                buffer_dtype=type_name_to_class["amp_bf16"],
+            )
+            layers_to_wrap = ['RobertaLayer', 'ResidualAttentionBlock']
+            layers = set()
+            for module in model.modules():
+                name = module.__class__.__name__
+                for layer in layers_to_wrap:
+                    if re.match(layer, name):
+                        layers.add(module.__class__)
 
-        if args.distill:
-            dist_model = torch.nn.parallel.DistributedDataParallel(dist_model, device_ids=[device], **ddp_args)
+            if is_master(args):
+                logging.info(f"FSDP Wrapped layers: {layers}")
+
+            flava_auto_wrapper_policy = functools.partial(
+                transformer_auto_wrap_policy,
+                transformer_layer_cls={
+                    RobertaLayer,
+                    ResidualAttentionBlock,
+                }
+            )
+            model = FSDP(
+                model,
+                mixed_precision=mixed_precision,
+                limit_all_gathers=False,
+                # cpu_offload=CPUOffload(offload_params=args.fsdp_cpu_offload),
+                # auto_wrap_policy=ModuleWrapPolicy(layers),
+                auto_wrap_policy=flava_auto_wrapper_policy,
+                use_orig_params=True,
+                sync_module_states=True,
+                device_id=device,
+            )
+            if is_master(args):
+                logging.info(f"After FSDP number of params: {sum(p.numel() for p in model.parameters())}")
+                logging.info(f"After FSDP memory allocated: {torch.cuda.memory_allocated()/1024**3:.4} GB")
+
+            # Activation checkpointing
+            non_reentrant_wrapper = functools.partial(
+                checkpoint_wrapper,
+                checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+            )
+            layers_to_grad_checkpoint = ['ResidualAttentionBlock', 'RobertaLayer']
+            layers_grad_checkpoint = set()
+            for module in model.modules():
+                name = module.__class__.__name__
+                for layer in layers_to_grad_checkpoint:
+                    if re.match(layer, name):
+                        layers_grad_checkpoint.add(module.__class__)
+            check_fn = lambda submodule: (any(isinstance(submodule, layer) for layer in layers_grad_checkpoint))
+            apply_activation_checkpointing(
+                model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn
+            )
+        else:
+            ddp_args = {}
+            if args.ddp_static_graph:
+                # this doesn't exist in older PyTorch, arg only added if enabled
+                ddp_args['static_graph'] = True
+            if args.ddp_find_unused_parameters:
+                ddp_args['find_unused_parameters'] = True
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
+            if args.distill:
+                dist_model = torch.nn.parallel.DistributedDataParallel(dist_model, device_ids=[device], **ddp_args)
 
     # create optimizer and scaler
     optimizer = None
@@ -347,13 +387,17 @@ def main(args):
 
     if args.train_data or args.dataset_type == "synthetic":
         assert not args.trace, 'Cannot train with traced model'
-
-        exclude = lambda n, p: p.ndim < 2 or "bn" in n or "ln" in n or "bias" in n or 'logit_scale' in n
-        include = lambda n, p: not exclude(n, p)
-
         named_parameters = list(model.named_parameters())
-        gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
-        rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
+        if args.fsdp:
+            def _param_name_without_fsdp_prefix(n):
+                n = n.replace("_fsdp_wrapped_module.", "")
+                n = n.replace("._checkpoint_wrapped_module", "")
+                return n
+            gain_or_bias_params = [p for n, p in named_parameters if _param_name_without_fsdp_prefix(n) not in parameters_to_decay and p.requires_grad]
+            rest_params = [p for n, p in named_parameters if _param_name_without_fsdp_prefix(n) in parameters_to_decay and p.requires_grad]
+        else:
+            gain_or_bias_params = [p for n, p in named_parameters if n not in parameters_to_decay and p.requires_grad]
+            rest_params = [p for n, p in named_parameters if n in parameters_to_decay and p.requires_grad]
 
         optimizer = optim.AdamW(
             [
@@ -369,8 +413,10 @@ def main(args):
             hvd.broadcast_parameters(model.state_dict(), root_rank=0)
             hvd.broadcast_optimizer_state(optimizer, root_rank=0)
 
-        scaler = ShardedGradScaler() #GradScaler() if args.precision == "amp" else None
-
+        if args.fsdp:
+            scaler = ShardedGradScaler()
+        else:
+            scaler = GradScaler() if args.precision == "amp" else None
     # optionally resume from a checkpoint
     start_epoch = 0
     if args.resume is not None:
@@ -383,7 +429,11 @@ def main(args):
                 sd = {k[len('module.'):]: v for k, v in sd.items()}
             model.load_state_dict(sd)
             if optimizer is not None:
-                optimizer.load_state_dict(checkpoint["optimizer"])
+                if args.fsdp:
+                    sharded_state_dict = FSDP.optim_state_dict_to_load(checkpoint["optimizer"], model, optimizer)
+                    optimizer.load_state_dict(sharded_state_dict)
+                else:
+                    optimizer.load_state_dict(checkpoint["optimizer"])
             if scaler is not None and 'scaler' in checkpoint:
                 scaler.load_state_dict(checkpoint['scaler'])
             logging.info(f"=> resuming checkpoint '{args.resume}' (epoch {start_epoch})")
@@ -392,13 +442,13 @@ def main(args):
             model.load_state_dict(checkpoint)
             logging.info(f"=> loaded checkpoint '{args.resume}' (epoch {start_epoch})")
 
-    # FSDP.set_state_dict_type(
-    #     model,
-    #     StateDictType.FULL_STATE_DICT,
-    #     FullStateDictConfig(rank0_only=True, offload_to_cpu=True),
-    #     FullOptimStateDictConfig(rank0_only=True, offload_to_cpu=True),
-    # )
-
+    if args.fsdp:
+        FSDP.set_state_dict_type(
+            model,
+            StateDictType.FULL_STATE_DICT,
+            FullStateDictConfig(rank0_only=True, offload_to_cpu=True),
+            FullOptimStateDictConfig(rank0_only=True, offload_to_cpu=True),
+        )
     # initialize datasets
     tokenizer = get_tokenizer(args.model)
     collate_fn = None
@@ -428,7 +478,7 @@ def main(args):
             exit(1)
 
     # determine if this worker should save logs and checkpoints. only do so if it is rank == 0
-    args.save_logs = args.logs and args.logs.lower() != 'none' and is_master(args)
+    args.save_logs = args.logs and args.logs.lower() != 'none' and (is_master(args) or args.fsdp)
     writer = None
     if args.save_logs and args.tensorboard:
         assert tensorboard is not None, "Please install tensorboard."
@@ -477,7 +527,7 @@ def main(args):
                 "epoch": completed_epoch,
                 "name": args.name,
                 "state_dict": model.state_dict(),
-                # "optimizer": FSDP.optim_state_dict(model, optimizer),
+                "optimizer": FSDP.optim_state_dict(model, optimizer) if args.fsdp else optimizer.state_dict()
             }
             if scaler is not None:
                 checkpoint_dict["scaler"] = scaler.state_dict()

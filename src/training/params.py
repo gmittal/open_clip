@@ -355,6 +355,12 @@ def parse_args(args):
         help="Enable unused parameters for DDP.",
     )
     parser.add_argument(
+        "--fsdp",
+        default=False,
+        action="store_true",
+        help="Use FSDP for distributed training."
+    )
+    parser.add_argument(
         "--no-set-device-rank",
         default=False,
         action="store_true",
