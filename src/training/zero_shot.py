@@ -59,7 +59,7 @@ def run(model, classifier, dataloader, args):
                 if args.distributed and not args.horovod:
                     if args.fsdp:
                         if is_flava:
-                            iamge_features = model(image=images, image_only=True)
+                            image_features = model(image=images, image_only=True)
                         else:
                             out_dict = model(image=images, text=None)
                             image_features = out_dict["image_features"]
