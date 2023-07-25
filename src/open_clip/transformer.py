@@ -220,13 +220,14 @@ class ResidualAttentionBlock(nn.Module):
             k_x: Optional[torch.Tensor] = None,
             v_x: Optional[torch.Tensor] = None,
             attn_mask: Optional[torch.Tensor] = None,
+            key_padding_mask: Optional[torch.Tensor] = None,
     ):
         k_x = k_x if k_x is not None else q_x
         v_x = v_x if v_x is not None else q_x
 
         attn_mask = attn_mask.to(q_x.dtype) if attn_mask is not None else None
         return self.attn(
-            q_x, k_x, v_x, need_weights=False, attn_mask=attn_mask
+            q_x, k_x, v_x, need_weights=False, attn_mask=attn_mask, key_padding_mask=key_padding_mask
         )[0]
 
     def forward(
@@ -235,11 +236,12 @@ class ResidualAttentionBlock(nn.Module):
             k_x: Optional[torch.Tensor] = None,
             v_x: Optional[torch.Tensor] = None,
             attn_mask: Optional[torch.Tensor] = None,
+            key_padding_mask: Optional[torch.Tensor] = None,
     ):
         k_x = self.ln_1_kv(k_x) if hasattr(self, "ln_1_kv") and k_x is not None else None
         v_x = self.ln_1_kv(v_x) if hasattr(self, "ln_1_kv") and v_x is not None else None
 
-        x = q_x + self.ls_1(self.attention(q_x=self.ln_1(q_x), k_x=k_x, v_x=v_x, attn_mask=attn_mask))
+        x = q_x + self.ls_1(self.attention(q_x=self.ln_1(q_x), k_x=k_x, v_x=v_x, attn_mask=attn_mask, key_padding_mask=key_padding_mask))
         x = x + self.ls_2(self.mlp(self.ln_2(x)))
         return x
 
@@ -279,8 +281,8 @@ class CustomResidualAttentionBlock(nn.Module):
         ]))
         self.ls_2 = LayerScale(d_model, ls_init_value) if ls_init_value is not None else nn.Identity()
 
-    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None):
-        x = x + self.ls_1(self.ln_attn(self.attn(self.ln_1(x), attn_mask=attn_mask)))
+    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None, key_padding_mask: Optional[torch.Tensor] = None):
+        x = x + self.ls_1(self.ln_attn(self.attn(self.ln_1(x), attn_mask=attn_mask, key_padding_mask=key_padding_mask)))
         x = x + self.ls_2(self.mlp(self.ln_2(x)))
         return x
 
@@ -310,13 +312,13 @@ class Transformer(nn.Module):
     def get_cast_dtype(self) -> torch.dtype:
         return self.resblocks[0].mlp.c_fc.weight.dtype
 
-    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None):
+    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None, key_padding_mask: Optional[torch.Tensor] = None):
         for r in self.resblocks:
             if self.grad_checkpointing and not torch.jit.is_scripting():
                 # TODO: handle kwargs https://github.com/pytorch/pytorch/issues/79887#issuecomment-1161758372
-                x = checkpoint(r, x, None, None, attn_mask)
+                x = checkpoint(r, x, None, None, attn_mask, key_padding_mask)
             else:
-                x = r(x, attn_mask=attn_mask)
+                x = r(x, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
         return x
 
 
@@ -497,7 +499,7 @@ class VisionTransformer(nn.Module):
 
         if self.output_tokens:
             return pooled, tokens
-        
+
         return pooled
 
 

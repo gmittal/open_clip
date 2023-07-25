@@ -5,19 +5,28 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from open_clip import get_cast_dtype, get_tokenizer
+from .distributed import is_master
 from .precision import get_autocast
 from .imagenet_zeroshot_data import imagenet_classnames, openai_imagenet_template
 
 
 def zero_shot_classifier(model, classnames, templates, args):
     tokenizer = get_tokenizer(args.model)
+    is_flava = args.model.startswith('flava')
     with torch.no_grad():
         zeroshot_weights = []
         for classname in tqdm(classnames):
             texts = [template(classname) for template in templates]  # format with class
             texts = tokenizer(texts).to(args.device)  # tokenize
             if args.distributed and not args.horovod:
-                class_embeddings = model.module.encode_text(texts)
+                if args.fsdp:
+                    if is_flava:
+                        class_embeddings = model(text=texts, text_only=True)
+                    else:
+                        out_dict = model(image=None, text=texts)
+                        class_embeddings = out_dict["text_features"]
+                else:
+                    class_embeddings = model.module.encode_text(texts)
             else:
                 class_embeddings = model.encode_text(texts)
             class_embedding = F.normalize(class_embeddings, dim=-1).mean(dim=0)
@@ -36,6 +45,7 @@ def accuracy(output, target, topk=(1,)):
 def run(model, classifier, dataloader, args):
     autocast = get_autocast(args.precision)
     cast_dtype = get_cast_dtype(args.precision)
+    is_flava = args.model.startswith('flava')
     with torch.no_grad():
         top1, top5, n = 0., 0., 0.
         for images, target in tqdm(dataloader, unit_scale=args.batch_size):
@@ -47,7 +57,14 @@ def run(model, classifier, dataloader, args):
             with autocast():
                 # predict
                 if args.distributed and not args.horovod:
-                    image_features = model.module.encode_image(images)
+                    if args.fsdp:
+                        if is_flava:
+                            image_features = model(image=images, image_only=True)
+                        else:
+                            out_dict = model(image=images, text=None)
+                            image_features = out_dict["image_features"]
+                    else:
+                        image_features = model.module.encode_image(images)
                 else:
                     image_features = model.encode_image(images)
                 image_features = F.normalize(image_features, dim=-1)
@@ -72,12 +89,15 @@ def zero_shot_eval(model, data, epoch, args):
     if (epoch % args.zeroshot_frequency) != 0 and epoch != args.epochs:
         return {}
 
-    logging.info('Starting zero-shot imagenet.')
+    if is_master(args):
+        logging.info('Starting zero-shot imagenet.')
+        logging.info('Building zero-shot classifier')
 
-    logging.info('Building zero-shot classifier')
     classifier = zero_shot_classifier(model, imagenet_classnames, openai_imagenet_template, args)
 
-    logging.info('Using classifier')
+    if is_master(args):
+        logging.info('Using classifier')
+
     results = {}
     if 'imagenet-val' in data:
         top1, top5 = run(model, classifier, data['imagenet-val'].dataloader, args)
@@ -88,6 +108,7 @@ def zero_shot_eval(model, data, epoch, args):
         results['imagenetv2-zeroshot-val-top1'] = top1
         results['imagenetv2-zeroshot-val-top5'] = top5
 
-    logging.info('Finished zero-shot imagenet.')
+    if is_master(args):
+        logging.info('Finished zero-shot imagenet.')
 
     return results

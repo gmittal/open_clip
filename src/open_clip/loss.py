@@ -114,7 +114,7 @@ class ClipLoss(nn.Module):
         else:
             logits_per_image = logit_scale * image_features @ text_features.T
             logits_per_text = logit_scale * text_features @ image_features.T
-        
+
         return logits_per_image, logits_per_text
 
     def forward(self, image_features, text_features, logit_scale, output_dict=False):
@@ -210,3 +210,176 @@ class DistillClipLoss(ClipLoss):
             return {"contrastive_loss": contrastive_loss, "distill_loss": distill_loss}
 
         return contrastive_loss, distill_loss
+
+
+class MLMLoss(nn.Module):
+
+    def __init__(self, ignore_index=-100):
+        super().__init__()
+        self.ignore_index = ignore_index
+
+    def forward(self, logits, labels):
+        assert logits.shape[:2] == labels.shape[:2]
+        vocab_size = logits.shape[-1]
+        logits = logits.reshape(-1, vocab_size)
+        labels = labels.reshape(-1)
+
+        # only compute loss on masked logits
+        mask = (labels != self.ignore_index)
+        masked_logits = logits[mask]
+        masked_labels = labels[mask]
+        return F.cross_entropy(masked_logits, masked_labels, ignore_index=self.ignore_index)
+
+
+class ITMLoss(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, itm_logits, itm_labels):
+        itm_logits = itm_logits.view(-1, 2)
+        itm_labels = itm_labels.view(-1)
+        return F.cross_entropy(itm_logits, itm_labels)
+
+
+class MAELoss(nn.Module):
+
+    def __init__(self, norm_pix_loss):
+        super().__init__()
+        self.norm_pix_loss = norm_pix_loss
+
+    def patchify(self, imgs, p):
+        """
+        imgs: (N, 3, H, W)
+        x: (N, L, patch_size**2 *3)
+        """
+        assert imgs.shape[2] == imgs.shape[3], 'image must be square'
+        assert imgs.shape[2] % p == 0, 'image size must be divisible by patch size'
+
+        h = w = imgs.shape[2] // p
+        x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
+        x = torch.einsum('nchpwq->nhwpqc', x)
+        x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
+        return x
+
+    def forward(self, imgs, pred, mask):
+        """
+        imgs: [N, 3, H, W]
+        pred: [N, L, p*p*3]
+        mask: [N, L], 0 is keep, 1 is remove,
+        """
+        patch_area = pred.shape[-1] / 3
+        patch_size = int(patch_area**0.5)
+        target = self.patchify(imgs, patch_size)
+        if self.norm_pix_loss:
+            mean = target.mean(dim=-1, keepdim=True)
+            var = target.var(dim=-1, keepdim=True)
+            target = (target - mean) / (var + 1.e-6)**.5
+
+        one_mask = (mask == 1)
+        loss = (pred[one_mask] - target[one_mask]) ** 2
+        loss = loss.mean()  # mean loss on removed patches
+        return loss
+
+
+class FlavaLoss(ClipLoss):
+
+    def __init__(
+        self,
+        contrastive_loss_weight,
+        itm_loss_weight,
+        mlm_loss_weight,
+        mae_loss_weight,
+        mae_norm_pix_loss,
+        *args,
+        **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.mlm_loss = MLMLoss()
+        self.mae_loss = MAELoss(mae_norm_pix_loss)
+        self.itm_loss = ITMLoss()
+
+        self.contrastive_loss_weight = contrastive_loss_weight
+        self.itm_loss_weight = itm_loss_weight
+        self.mlm_loss_weight = mlm_loss_weight
+        self.mae_loss_weight = mae_loss_weight
+
+    def forward_mlm(self, mlm_logits, mlm_labels):
+        return {
+            "mlm_loss": self.mlm_loss_weight * self.mlm_loss(mlm_logits, mlm_labels)
+        }
+
+    def forward_mae(self, image, mae_mask, mae_logits):
+        return {
+            "mae_loss": self.mae_loss_weight * self.mae_loss(image, mae_logits, mae_mask)
+        }
+
+    def forward(
+        self,
+        *,
+        # contrastive
+        image_features,
+        text_features,
+        logit_scale,
+
+        # masked multimodal
+        image,
+        mae_mask,
+        mm_mae_logits,
+        mlm_labels,
+        mm_mlm_logits,
+
+        # image-text matching
+        itm_logits,
+        itm_labels,
+
+        # unimodal text
+        unimodal_mlm_logits=None,
+        unimodal_mlm_labels=None,
+
+        # unimodal image
+        unimodal_mae_logits=None,
+        unimodal_mae_mask=None,
+        unimodal_image=None,
+
+        output_dict=False,
+    ):
+        do_uni_mlm = unimodal_mlm_logits is not None and unimodal_mlm_labels is not None
+        do_uni_mae = unimodal_mae_logits is not None and unimodal_mae_mask is not None \
+                        and unimodal_image is not None
+        # unimodal
+        if do_uni_mlm:
+            uni_mlm = self.forward_mlm(unimodal_mlm_logits, unimodal_mlm_labels)["mlm_loss"]
+        if do_uni_mae:
+            uni_mae = self.forward_mae(unimodal_image, unimodal_mae_mask, unimodal_mae_logits)["mae_loss"]
+
+        # multimodal
+        clip_loss = super().forward(image_features, text_features, logit_scale)
+        itm_loss = self.itm_loss(itm_logits, itm_labels)
+        mm_mlm_loss = self.mlm_loss(mm_mlm_logits, mlm_labels)
+        mm_mae_loss = self.mae_loss(image, mm_mae_logits, mae_mask)
+
+        clip_loss = self.contrastive_loss_weight * clip_loss
+        itm_loss = self.itm_loss_weight * itm_loss
+        mm_mlm_loss = self.mlm_loss_weight * mm_mlm_loss
+        mm_mae_loss = self.mae_loss_weight * mm_mae_loss
+
+        if output_dict:
+            out_dict = {
+                "contrastive_loss": clip_loss,
+                "itm_loss": itm_loss,
+                "mm_mlm_loss": mm_mlm_loss,
+                "mm_mae_loss": mm_mae_loss,
+            }
+            if do_uni_mlm:
+                out_dict["unimodal_mlm"] = uni_mlm
+            if do_uni_mae:
+                out_dict["unimodal_mae"] = uni_mae
+            return out_dict
+
+        out_list = [clip_loss, itm_loss, mm_mlm_loss, mm_mae_loss]
+        if do_uni_mlm:
+            out_list.append(uni_mlm)
+        if do_uni_mae:
+            out_list.append(uni_mae)
+        return out_list

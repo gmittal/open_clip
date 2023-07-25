@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
-from .hf_model import HFTextEncoder
+from .hf_model import HFEncoder
 from .modified_resnet import ModifiedResNet
 from .timm_model import TimmModel
 from .transformer import LayerNormFp32, LayerNorm, QuickGELU, Attention, VisionTransformer, TextTransformer
@@ -43,6 +43,12 @@ class CLIPVisionCfg:
     timm_drop: float = 0.  # head dropout
     timm_drop_path: Optional[float] = None  # backbone stochastic depth
     output_tokens: bool = False
+    hf_model_name: str = None
+    hf_tokenizer_name: str = None
+    hf_model_pretrained: bool = True
+    hf_model_config: dict = None
+    proj: str = 'mlp'
+    pooler_type: str = 'mean_pooler'
 
 
 @dataclass
@@ -56,11 +62,13 @@ class CLIPTextCfg:
     hf_model_name: str = None
     hf_tokenizer_name: str = None
     hf_model_pretrained: bool = True
+    hf_model_config: dict = None
     proj: str = 'mlp'
     pooler_type: str = 'mean_pooler'
     embed_cls: bool = False
     pad_id: int = 0
     output_tokens: bool = False
+    unimodal_context_length: int = 512
 
 
 def get_cast_dtype(precision: str):
@@ -86,7 +94,16 @@ def _build_vision_tower(
     # NOTE: timm models always use native GELU regardless of quick_gelu flag.
     act_layer = QuickGELU if quick_gelu else nn.GELU
 
-    if vision_cfg.timm_model_name:
+    if hasattr(vision_cfg, 'hf_model_name') and vision_cfg.hf_model_name:
+        visual = HFEncoder(
+            vision_cfg.hf_model_name,
+            output_dim=embed_dim,
+            config=vision_cfg.hf_model_config,
+            proj=vision_cfg.proj,
+            pooler_type=vision_cfg.pooler_type,
+            pretrained=vision_cfg.hf_model_pretrained
+       )
+    elif vision_cfg.timm_model_name:
         visual = TimmModel(
             vision_cfg.timm_model_name,
             pretrained=vision_cfg.timm_model_pretrained,
@@ -144,9 +161,10 @@ def _build_text_tower(
         text_cfg = CLIPTextCfg(**text_cfg)
 
     if text_cfg.hf_model_name:
-        text = HFTextEncoder(
+        text = HFEncoder(
             text_cfg.hf_model_name,
             output_dim=embed_dim,
+            config=text_cfg.hf_model_config,
             proj=text_cfg.proj,
             pooler_type=text_cfg.pooler_type,
             pretrained=text_cfg.hf_model_pretrained,
@@ -227,10 +245,10 @@ class CLIP(nn.Module):
         x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
         return F.normalize(x, dim=-1) if normalize else x
 
-    def forward(self, image, text):
+    def forward(self, image, text, output_dict=False):
         image_features = self.encode_image(image, normalize=True)
         text_features = self.encode_text(text, normalize=True)
-        if self.output_dict:
+        if self.output_dict or output_dict:
             return {
                 "image_features": image_features,
                 "text_features": text_features,
@@ -256,6 +274,8 @@ class CustomTextCLIP(nn.Module):
         self.visual = _build_vision_tower(embed_dim, vision_cfg, quick_gelu, cast_dtype)
         self.text = _build_text_tower(embed_dim, text_cfg, quick_gelu, cast_dtype)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        self.image_projection = nn.Linear(embed_dim, embed_dim)
+        self.text_projection = nn.Linear(embed_dim, embed_dim)
 
     def lock_image_tower(self, unlocked_groups=0, freeze_bn_stats=False):
         # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
@@ -271,16 +291,20 @@ class CustomTextCLIP(nn.Module):
 
     def encode_image(self, image, normalize: bool = False):
         features = self.visual(image)
+        features = self.image_projection(features)
         return F.normalize(features, dim=-1) if normalize else features
 
     def encode_text(self, text, normalize: bool = False):
         features = self.text(text)
+        if features.ndim == 3:
+            features = features[:, 0, :]
+        features = self.text_projection(features)
         return F.normalize(features, dim=-1) if normalize else features
 
-    def forward(self, image, text):
+    def forward(self, image, text, output_dict=False):
         image_features = self.encode_image(image, normalize=True)
         text_features = self.encode_text(text, normalize=True)
-        if self.output_dict:
+        if self.output_dict or output_dict:
             return {
                 "image_features": image_features,
                 "text_features": text_features,

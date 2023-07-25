@@ -1,4 +1,6 @@
+cc_data
 logs/
+runs/
 wandb/
 models/
 features/
