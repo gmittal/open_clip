@@ -462,7 +462,8 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
 
     if is_train:
         if not resampled:
-            assert num_shards >= args.workers * args.world_size, 'number of shards must be >= total workers'
+            total_workers = args.workers * args.world_size
+            assert num_shards >= total_workers, f'number of shards ({num_shards}) must be >= total workers ({total_workers})'
         # roll over and repeat a few samples to get same number of full batches on each node
         round_fn = math.floor if floor else math.ceil
         global_batch_size = args.batch_size * args.world_size
